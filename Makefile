@@ -105,6 +105,7 @@ CPP_SRCS := \
     src/proc/scheduler.cpp \
     src/module/kapi.cpp \
     src/module/module_manager.cpp \
+    src/module/elf_loader.cpp \
     src/shell/line_editor.cpp \
     src/shell/text_editor.cpp \
     src/shell/commands/fs_commands.cpp \

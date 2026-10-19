@@ -103,9 +103,59 @@ Status CcCommand::execute(const CommandArgs& args) {
         return Status::InvalidArgument;
     }
 
-    char fullPath[256]{};
-    resolveTaskPath(args.argv[1], fullPath, sizeof(fullPath));
-    return module::ModuleManager::instance().checkCompile(fullPath);
+    const char* srcFile = nullptr;
+    const char* outFile = nullptr;
+    bool checkOnly = false;
+
+    for (usize i = 1; i < args.argc; ++i) {
+        if (str::compare(args.argv[i], "-o") == 0) {
+            if (i + 1 < args.argc) {
+                outFile = args.argv[++i];
+            } else {
+                kprintf("\033[31mcc: missing argument after '-o'\033[0m\n");
+                return Status::InvalidArgument;
+            }
+        } else if (str::compare(args.argv[i], "-c") == 0) {
+            checkOnly = true;
+        } else if (args.argv[i][0] == '-') {
+            kprintf("\033[31mcc: unknown option '%s'\033[0m\n", args.argv[i]);
+            return Status::InvalidArgument;
+        } else {
+            if (!srcFile) {
+                srcFile = args.argv[i];
+            } else if (!outFile) {
+                outFile = args.argv[i];
+            }
+        }
+    }
+
+    if (!srcFile) {
+        kprintf("Usage: %s\n", getUsage());
+        return Status::InvalidArgument;
+    }
+
+    char fullSrcPath[256]{};
+    resolveTaskPath(srcFile, fullSrcPath, sizeof(fullSrcPath));
+
+    if (checkOnly) {
+        return module::ModuleManager::instance().checkCompile(fullSrcPath);
+    }
+
+    if (!outFile) {
+        outFile = "a.out";
+    }
+
+    char fullOutPath[256]{};
+    resolveTaskPath(outFile, fullOutPath, sizeof(fullOutPath));
+
+    usize writtenBytes = 0;
+    Status st = module::ModuleManager::instance().compileToElf(fullSrcPath, fullOutPath, &writtenBytes);
+    if (st == Status::Ok) {
+        kprintf("\033[1;32m[cc]\033[0m %s -> %s (%zu bytes ELF64)\n", srcFile, outFile, writtenBytes);
+    } else {
+        kprintf("\033[31mcc: compilation failed: %s\033[0m\n", statusToString(st));
+    }
+    return st;
 }
 
 } // namespace cortez::shell::commands

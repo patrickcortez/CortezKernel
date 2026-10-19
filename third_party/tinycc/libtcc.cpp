@@ -17,6 +17,7 @@
 #include "../../src/proc/scheduler.hpp"
 #include "../../src/lib/string_utils.hpp"
 #include "../../src/lib/printk.hpp"
+#include "../../src/module/elf64.hpp"
 #include <stdarg.h>
 
 namespace {
@@ -3956,6 +3957,384 @@ const char* tcc_get_exported_symbol_name(TCCState* s, size_t index) {
 void* tcc_get_exported_symbol_addr(TCCState* s, size_t index) {
     if (!s || index >= s->funcCount || !s->funcs[index].isDefined) return nullptr;
     return s->funcs[index].relocatedAddr;
+}
+
+int tcc_output_file(TCCState* s, const char* filename) {
+    if (!s || s->hasError || !filename || !filename[0]) return -1;
+    if (s->codeVec.size == 0) return -1;
+
+    // We build 8 standard ELF64 sections:
+    // 0: SHN_UNDEF (Null)
+    // 1: .text
+    // 2: .data
+    // 3: .rela.text
+    // 4: .rela.data
+    // 5: .symtab
+    // 6: .strtab
+    // 7: .shstrtab
+
+    ByteVec strtab{};
+    strtab.push8(0);
+
+    ByteVec shstrtab{};
+    shstrtab.push8(0);
+
+    auto addString = [](ByteVec& vec, const char* str) -> u32 {
+        if (!str || !str[0]) return 0;
+        u32 offset = static_cast<u32>(vec.size);
+        vec.append(str, str::length(str) + 1);
+        return offset;
+    };
+
+    u32 nameText     = addString(shstrtab, ".text");
+    u32 nameData     = addString(shstrtab, ".data");
+    u32 nameRelaText = addString(shstrtab, ".rela.text");
+    u32 nameRelaData = addString(shstrtab, ".rela.data");
+    u32 nameSymtab   = addString(shstrtab, ".symtab");
+    u32 nameStrtab   = addString(shstrtab, ".strtab");
+    u32 nameShstrtab = addString(shstrtab, ".shstrtab");
+
+    ByteVec symtabVec{};
+
+    // Symbol 0: Null symbol
+    elf::Elf64_Sym nullSym{};
+    symtabVec.append(&nullSym, sizeof(nullSym));
+
+    // Symbol 1: .text section symbol (STB_LOCAL, STT_SECTION)
+    elf::Elf64_Sym textSecSym{};
+    textSecSym.st_info  = ELF64_ST_INFO(elf::STB_LOCAL, elf::STT_SECTION);
+    textSecSym.st_shndx = 1;
+    symtabVec.append(&textSecSym, sizeof(textSecSym));
+
+    // Symbol 2: .data section symbol (STB_LOCAL, STT_SECTION)
+    elf::Elf64_Sym dataSecSym{};
+    dataSecSym.st_info  = ELF64_ST_INFO(elf::STB_LOCAL, elf::STT_SECTION);
+    dataSecSym.st_shndx = 2;
+    symtabVec.append(&dataSecSym, sizeof(dataSecSym));
+
+    constexpr u32 FIRST_GLOBAL_SYM = 3;
+
+    auto findSymbol = [&](const char* name) -> i32 {
+        if (!name || !name[0]) return -1;
+        usize count = symtabVec.size / sizeof(elf::Elf64_Sym);
+        const auto* syms = reinterpret_cast<const elf::Elf64_Sym*>(symtabVec.data);
+        for (usize i = 1; i < count; ++i) {
+            if (syms[i].st_name < strtab.size) {
+                const char* symName = reinterpret_cast<const char*>(strtab.data + syms[i].st_name);
+                if (str::compare(symName, name) == 0) {
+                    return static_cast<i32>(i);
+                }
+            }
+        }
+        return -1;
+    };
+
+    u32 funcSymIdx[MAX_FUNCS]{};
+    for (usize fi = 0; fi < s->funcCount; ++fi) {
+        const auto& fn = s->funcs[fi];
+        i32 existing = findSymbol(fn.name);
+        if (existing >= 0) {
+            funcSymIdx[fi] = static_cast<u32>(existing);
+            continue;
+        }
+
+        u32 nameOff = addString(strtab, fn.name);
+        elf::Elf64_Sym sym{};
+        sym.st_name = nameOff;
+        if (fn.isDefined) {
+            sym.st_info  = ELF64_ST_INFO(elf::STB_GLOBAL, elf::STT_FUNC);
+            sym.st_shndx = 1;
+            sym.st_value = fn.codeOffset;
+        } else {
+            sym.st_info  = ELF64_ST_INFO(elf::STB_GLOBAL, elf::STT_NOTYPE);
+            sym.st_shndx = elf::SHN_UNDEF;
+            sym.st_value = 0;
+        }
+        funcSymIdx[fi] = static_cast<u32>(symtabVec.size / sizeof(elf::Elf64_Sym));
+        symtabVec.append(&sym, sizeof(sym));
+    }
+
+    u32 globalSymIdx[MAX_GLOBALS]{};
+    for (usize gi = 0; gi < s->globalCount; ++gi) {
+        const auto& gv = s->globals[gi];
+        i32 existing = findSymbol(gv.name);
+        if (existing >= 0) {
+            globalSymIdx[gi] = static_cast<u32>(existing);
+            continue;
+        }
+
+        u32 nameOff = addString(strtab, gv.name);
+        elf::Elf64_Sym sym{};
+        sym.st_name = nameOff;
+        if (!gv.isExtern) {
+            sym.st_info  = ELF64_ST_INFO(elf::STB_GLOBAL, elf::STT_OBJECT);
+            sym.st_shndx = 2;
+            sym.st_value = gv.dataOffset;
+            sym.st_size  = gv.byteSize;
+        } else {
+            sym.st_info  = ELF64_ST_INFO(elf::STB_GLOBAL, elf::STT_NOTYPE);
+            sym.st_shndx = elf::SHN_UNDEF;
+            sym.st_value = 0;
+        }
+        globalSymIdx[gi] = static_cast<u32>(symtabVec.size / sizeof(elf::Elf64_Sym));
+        symtabVec.append(&sym, sizeof(sym));
+    }
+
+    u32 extSymIdx[MAX_EXT_SYMS]{};
+    for (usize ei = 0; ei < s->extSymCount; ++ei) {
+        const auto& ext = s->extSyms[ei];
+        i32 existing = findSymbol(ext.name);
+        if (existing >= 0) {
+            extSymIdx[ei] = static_cast<u32>(existing);
+            continue;
+        }
+
+        u32 nameOff = addString(strtab, ext.name);
+        elf::Elf64_Sym sym{};
+        sym.st_name  = nameOff;
+        sym.st_info  = ELF64_ST_INFO(elf::STB_GLOBAL, elf::STT_NOTYPE);
+        sym.st_shndx = elf::SHN_UNDEF;
+        sym.st_value = 0;
+        extSymIdx[ei] = static_cast<u32>(symtabVec.size / sizeof(elf::Elf64_Sym));
+        symtabVec.append(&sym, sizeof(sym));
+    }
+
+    ByteVec relaTextVec{};
+    ByteVec relaDataVec{};
+
+    for (usize ri = 0; ri < s->relocCount; ++ri) {
+        const RelocEntry& rel = s->relocs[ri];
+        switch (rel.kind) {
+            case RelocKind::InternalFuncCall32: {
+                u32 symIdx = (rel.targetIndex < s->funcCount) ? funcSymIdx[rel.targetIndex] : 0;
+                elf::Elf64_Rela rela{};
+                rela.r_offset = rel.patchOffset;
+                rela.r_info   = ELF64_R_INFO(symIdx, elf::R_X86_64_PC32);
+                rela.r_addend = -4;
+                relaTextVec.append(&rela, sizeof(rela));
+                break;
+            }
+            case RelocKind::InternalFuncAddr64: {
+                u32 symIdx = (rel.targetIndex < s->funcCount) ? funcSymIdx[rel.targetIndex] : 0;
+                elf::Elf64_Rela rela{};
+                rela.r_offset = rel.patchOffset;
+                rela.r_info   = ELF64_R_INFO(symIdx, elf::R_X86_64_64);
+                rela.r_addend = 0;
+                relaTextVec.append(&rela, sizeof(rela));
+                break;
+            }
+            case RelocKind::ExternalSymAddr64: {
+                u32 symIdx = (rel.targetIndex < s->extSymCount) ? extSymIdx[rel.targetIndex] : 0;
+                elf::Elf64_Rela rela{};
+                rela.r_offset = rel.patchOffset;
+                rela.r_info   = ELF64_R_INFO(symIdx, elf::R_X86_64_64);
+                rela.r_addend = 0;
+                relaTextVec.append(&rela, sizeof(rela));
+                break;
+            }
+            case RelocKind::DataOffsetAddr64: {
+                elf::Elf64_Rela rela{};
+                rela.r_offset = rel.patchOffset;
+                rela.r_info   = ELF64_R_INFO(2 /* .data sec sym */, elf::R_X86_64_64);
+                rela.r_addend = static_cast<i64>(rel.targetIndex);
+                relaTextVec.append(&rela, sizeof(rela));
+                break;
+            }
+            case RelocKind::DataFuncPtr64: {
+                u32 symIdx = (rel.targetIndex < s->funcCount) ? funcSymIdx[rel.targetIndex] : 0;
+                elf::Elf64_Rela rela{};
+                rela.r_offset = rel.patchOffset;
+                rela.r_info   = ELF64_R_INFO(symIdx, elf::R_X86_64_64);
+                rela.r_addend = 0;
+                relaDataVec.append(&rela, sizeof(rela));
+                break;
+            }
+        }
+    }
+
+    auto alignVec = [](ByteVec& v, usize align) {
+        while ((v.size % align) != 0) {
+            v.push8(0);
+        }
+    };
+
+    ByteVec elfOut{};
+    elf::Elf64_Ehdr zeroHdr{};
+    elfOut.append(&zeroHdr, sizeof(zeroHdr));
+
+    alignVec(elfOut, 16);
+    u64 textOff = elfOut.size;
+    elfOut.append(s->codeVec.data, s->codeVec.size);
+    u64 textSize = s->codeVec.size;
+
+    alignVec(elfOut, 16);
+    u64 dataOff = elfOut.size;
+    if (s->dataVec.size > 0) {
+        elfOut.append(s->dataVec.data, s->dataVec.size);
+    }
+    u64 dataSize = s->dataVec.size;
+
+    alignVec(elfOut, 8);
+    u64 relaTextOff = elfOut.size;
+    if (relaTextVec.size > 0) {
+        elfOut.append(relaTextVec.data, relaTextVec.size);
+    }
+    u64 relaTextSize = relaTextVec.size;
+
+    alignVec(elfOut, 8);
+    u64 relaDataOff = elfOut.size;
+    if (relaDataVec.size > 0) {
+        elfOut.append(relaDataVec.data, relaDataVec.size);
+    }
+    u64 relaDataSize = relaDataVec.size;
+
+    alignVec(elfOut, 8);
+    u64 symtabOff = elfOut.size;
+    elfOut.append(symtabVec.data, symtabVec.size);
+    u64 symtabSize = symtabVec.size;
+
+    alignVec(elfOut, 1);
+    u64 strtabOff = elfOut.size;
+    elfOut.append(strtab.data, strtab.size);
+    u64 strtabSize = strtab.size;
+
+    alignVec(elfOut, 1);
+    u64 shstrtabOff = elfOut.size;
+    elfOut.append(shstrtab.data, shstrtab.size);
+    u64 shstrtabSize = shstrtab.size;
+
+    alignVec(elfOut, 8);
+    u64 shoff = elfOut.size;
+
+    constexpr usize NUM_SECTIONS = 8;
+    elf::Elf64_Shdr shdrs[NUM_SECTIONS]{};
+
+    // 1: .text
+    shdrs[1].sh_name      = nameText;
+    shdrs[1].sh_type      = elf::SHT_PROGBITS;
+    shdrs[1].sh_flags     = elf::SHF_ALLOC | elf::SHF_EXECINSTR;
+    shdrs[1].sh_addr      = 0;
+    shdrs[1].sh_offset    = textOff;
+    shdrs[1].sh_size      = textSize;
+    shdrs[1].sh_addralign = 16;
+
+    // 2: .data
+    shdrs[2].sh_name      = nameData;
+    shdrs[2].sh_type      = elf::SHT_PROGBITS;
+    shdrs[2].sh_flags     = elf::SHF_ALLOC | elf::SHF_WRITE;
+    shdrs[2].sh_addr      = 0;
+    shdrs[2].sh_offset    = dataOff;
+    shdrs[2].sh_size      = dataSize;
+    shdrs[2].sh_addralign = 16;
+
+    // 3: .rela.text
+    shdrs[3].sh_name      = nameRelaText;
+    shdrs[3].sh_type      = elf::SHT_RELA;
+    shdrs[3].sh_flags     = elf::SHF_INFO_LINK;
+    shdrs[3].sh_addr      = 0;
+    shdrs[3].sh_offset    = relaTextOff;
+    shdrs[3].sh_size      = relaTextSize;
+    shdrs[3].sh_link      = 5; // .symtab
+    shdrs[3].sh_info      = 1; // .text
+    shdrs[3].sh_addralign = 8;
+    shdrs[3].sh_entsize   = sizeof(elf::Elf64_Rela);
+
+    // 4: .rela.data
+    shdrs[4].sh_name      = nameRelaData;
+    shdrs[4].sh_type      = elf::SHT_RELA;
+    shdrs[4].sh_flags     = elf::SHF_INFO_LINK;
+    shdrs[4].sh_addr      = 0;
+    shdrs[4].sh_offset    = relaDataOff;
+    shdrs[4].sh_size      = relaDataSize;
+    shdrs[4].sh_link      = 5; // .symtab
+    shdrs[4].sh_info      = 2; // .data
+    shdrs[4].sh_addralign = 8;
+    shdrs[4].sh_entsize   = sizeof(elf::Elf64_Rela);
+
+    // 5: .symtab
+    shdrs[5].sh_name      = nameSymtab;
+    shdrs[5].sh_type      = elf::SHT_SYMTAB;
+    shdrs[5].sh_flags     = 0;
+    shdrs[5].sh_addr      = 0;
+    shdrs[5].sh_offset    = symtabOff;
+    shdrs[5].sh_size      = symtabSize;
+    shdrs[5].sh_link      = 6; // .strtab
+    shdrs[5].sh_info      = FIRST_GLOBAL_SYM;
+    shdrs[5].sh_addralign = 8;
+    shdrs[5].sh_entsize   = sizeof(elf::Elf64_Sym);
+
+    // 6: .strtab
+    shdrs[6].sh_name      = nameStrtab;
+    shdrs[6].sh_type      = elf::SHT_STRTAB;
+    shdrs[6].sh_flags     = 0;
+    shdrs[6].sh_addr      = 0;
+    shdrs[6].sh_offset    = strtabOff;
+    shdrs[6].sh_size      = strtabSize;
+    shdrs[6].sh_addralign = 1;
+
+    // 7: .shstrtab
+    shdrs[7].sh_name      = nameShstrtab;
+    shdrs[7].sh_type      = elf::SHT_STRTAB;
+    shdrs[7].sh_flags     = 0;
+    shdrs[7].sh_addr      = 0;
+    shdrs[7].sh_offset    = shstrtabOff;
+    shdrs[7].sh_size      = shstrtabSize;
+    shdrs[7].sh_addralign = 1;
+
+    elfOut.append(shdrs, sizeof(shdrs));
+
+    elf::Elf64_Addr entryAddr = 0;
+    isize mainIdx = findFunction(s, "main");
+    if (mainIdx >= 0 && s->funcs[mainIdx].isDefined) {
+        entryAddr = s->funcs[mainIdx].codeOffset;
+    } else {
+        isize initIdx = findFunction(s, "module_init");
+        if (initIdx >= 0 && s->funcs[initIdx].isDefined) {
+            entryAddr = s->funcs[initIdx].codeOffset;
+        }
+    }
+
+    elf::Elf64_Ehdr ehdr{};
+    ehdr.e_ident[elf::EI_MAG0]       = elf::ELFMAG0;
+    ehdr.e_ident[elf::EI_MAG1]       = elf::ELFMAG1;
+    ehdr.e_ident[elf::EI_MAG2]       = elf::ELFMAG2;
+    ehdr.e_ident[elf::EI_MAG3]       = elf::ELFMAG3;
+    ehdr.e_ident[elf::EI_CLASS]      = elf::ELFCLASS64;
+    ehdr.e_ident[elf::EI_DATA]       = elf::ELFDATA2LSB;
+    ehdr.e_ident[elf::EI_VERSION]    = elf::EV_CURRENT;
+    ehdr.e_ident[elf::EI_OSABI]      = elf::ELFOSABI_SYSV;
+    ehdr.e_ident[elf::EI_ABIVERSION] = 0;
+
+    ehdr.e_type      = elf::ET_REL;
+    ehdr.e_machine   = elf::EM_X86_64;
+    ehdr.e_version   = elf::EV_CURRENT;
+    ehdr.e_entry     = entryAddr;
+    ehdr.e_phoff     = 0;
+    ehdr.e_shoff     = shoff;
+    ehdr.e_flags     = 0;
+    ehdr.e_ehsize    = sizeof(elf::Elf64_Ehdr);
+    ehdr.e_phentsize = 0;
+    ehdr.e_phnum     = 0;
+    ehdr.e_shentsize = sizeof(elf::Elf64_Shdr);
+    ehdr.e_shnum     = NUM_SECTIONS;
+    ehdr.e_shstrndx  = 7;
+
+    memcpy(elfOut.data, &ehdr, sizeof(ehdr));
+
+    const proc::Task* t = proc::Scheduler::instance().getCurrentTask();
+    const char* cwd     = t ? t->getCwd() : "/";
+    Status st = fs::VfsManager::instance().writeFileAll(cwd, filename, elfOut.data, elfOut.size);
+
+    int totalWritten = (st == Status::Ok) ? static_cast<int>(elfOut.size) : -1;
+
+    strtab.destroy();
+    shstrtab.destroy();
+    symtabVec.destroy();
+    relaTextVec.destroy();
+    relaDataVec.destroy();
+    elfOut.destroy();
+
+    return totalWritten;
 }
 
 } // extern "C"

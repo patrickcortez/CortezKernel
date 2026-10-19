@@ -17,6 +17,7 @@
 #include "../lib/printk.hpp"
 #include "../lib/string_utils.hpp"
 #include "../../third_party/tinycc/libtcc.h"
+#include "elf_loader.hpp"
 
 namespace cortez::module {
 
@@ -356,6 +357,97 @@ Status ModuleManager::load(const char* path) noexcept {
         return Status::OutOfMemory;
     }
 
+    const proc::Task* t   = proc::Scheduler::instance().getCurrentTask();
+    const char*       cwd = t ? t->getCwd() : "/";
+
+    // Detect on-disk ELF kernel module
+    auto fdRes = fs::VfsManager::instance().open(cwd, path, fs::O_RDONLY);
+    if (!fdRes.isError()) {
+        i32 fd = fdRes.value();
+        u8 magic[4]{};
+        auto rRes = fs::VfsManager::instance().read(fd, magic, sizeof(magic));
+        if (rRes.isOk() && rRes.value() == sizeof(magic) && ElfLoader::isElf(magic, sizeof(magic))) {
+            fs::FileStat fst{};
+            (void)fs::VfsManager::instance().stat(cwd, path, &fst);
+            if (fst.size >= sizeof(elf::Elf64_Ehdr)) {
+                void* elfBuf = klibc_malloc(fst.size);
+                if (!elfBuf) {
+                    fs::VfsManager::instance().close(fd);
+                    return Status::OutOfMemory;
+                }
+                (void)fs::VfsManager::instance().seek(fd, 0, fs::SEEK_SET);
+                (void)fs::VfsManager::instance().read(fd, elfBuf, fst.size);
+                fs::VfsManager::instance().close(fd);
+
+                char baseName[32]{};
+                extractBaseName(path, baseName, sizeof(baseName));
+
+                auto elfRes = ElfLoader::load(elfBuf, fst.size, baseName);
+                klibc_free(elfBuf);
+
+                if (elfRes.isError()) {
+                    pr_err("elf", "%s: failed to load ELF module: %s", path, statusToString(elfRes.status()));
+                    return elfRes.status();
+                }
+
+                auto loadedImg = elfRes.value();
+                auto initFn = reinterpret_cast<int (*)(void)>(loadedImg.initAddr);
+                auto exitFn = reinterpret_cast<void (*)(void)>(loadedImg.exitAddr);
+
+                if (!initFn) {
+                    pr_err("mod", "%s: missing 'int module_init(void)' entry point", path);
+                    ElfLoader::unload(loadedImg);
+                    return Status::NotFound;
+                }
+
+                memset(slot, 0, sizeof(LoadedModule));
+                slot->inUse    = true;
+                slot->id       = m_nextModuleId++;
+                slot->codeBase = loadedImg.codeBase;
+                slot->codeSize = loadedImg.totalBytes;
+                slot->initFn   = initFn;
+                slot->exitFn   = exitFn;
+                extractBaseName(path, slot->name, sizeof(slot->name));
+                str::copy(slot->description, "ELF64 Kernel Module", sizeof(slot->description));
+                str::copy(slot->sourcePath, path, sizeof(slot->sourcePath));
+
+                u32 prevMod = m_activeModuleId;
+                m_activeModuleId = slot->id;
+
+                cortez_jmp_buf* jmpEnv = nullptr;
+                bool guarded = enterRecoveryGuard(&jmpEnv);
+                int initRc = -1;
+
+                if (guarded && jmpEnv) {
+                    if (cortez_setjmp(*jmpEnv) == 0) {
+                        initRc = initFn();
+                    } else {
+                        pr_err("mod", "Module '%s' crashed during module_init(); aborted", slot->name);
+                        initRc = -1;
+                    }
+                    leaveRecoveryGuard();
+                } else {
+                    initRc = initFn();
+                }
+
+                m_activeModuleId = prevMod;
+
+                if (initRc != 0) {
+                    pr_err("mod", "Module '%s' init failed with error code %d", slot->name, initRc);
+                    cleanupModuleResources(*slot);
+                    ElfLoader::unload(loadedImg);
+                    memset(slot, 0, sizeof(LoadedModule));
+                    return Status::InvalidArgument;
+                }
+
+                pr_info("mod", "Loaded module '%s' (id=%u, %zu bytes, init=0x%llx)",
+                        slot->name, slot->id, slot->codeSize, reinterpret_cast<u64>(initFn));
+                return Status::Ok;
+            }
+        }
+        fs::VfsManager::instance().close(fd);
+    }
+
     TCCState* s = tcc_new();
     if (!s) {
         return Status::OutOfMemory;
@@ -532,6 +624,90 @@ Status ModuleManager::runProgram(const char* path, usize argc, const char** argv
         return Status::OutOfMemory;
     }
 
+    const proc::Task* t   = proc::Scheduler::instance().getCurrentTask();
+    const char*       cwd = t ? t->getCwd() : "/";
+
+    // Detect on-disk ELF executable
+    auto fdRes = fs::VfsManager::instance().open(cwd, path, fs::O_RDONLY);
+    if (!fdRes.isError()) {
+        i32 fd = fdRes.value();
+        u8 magic[4]{};
+        auto rRes = fs::VfsManager::instance().read(fd, magic, sizeof(magic));
+        if (rRes.isOk() && rRes.value() == sizeof(magic) && ElfLoader::isElf(magic, sizeof(magic))) {
+            fs::FileStat fst{};
+            (void)fs::VfsManager::instance().stat(cwd, path, &fst);
+            if (fst.size >= sizeof(elf::Elf64_Ehdr)) {
+                void* elfBuf = klibc_malloc(fst.size);
+                if (!elfBuf) {
+                    fs::VfsManager::instance().close(fd);
+                    return Status::OutOfMemory;
+                }
+                (void)fs::VfsManager::instance().seek(fd, 0, fs::SEEK_SET);
+                (void)fs::VfsManager::instance().read(fd, elfBuf, fst.size);
+                fs::VfsManager::instance().close(fd);
+
+                char baseName[32]{};
+                extractBaseName(path, baseName, sizeof(baseName));
+
+                auto elfRes = ElfLoader::load(elfBuf, fst.size, baseName);
+                klibc_free(elfBuf);
+
+                if (elfRes.isError()) {
+                    pr_err("elf", "%s: failed to load ELF image: %s", path, statusToString(elfRes.status()));
+                    return elfRes.status();
+                }
+
+                auto loadedImg = elfRes.value();
+                auto mainFn = reinterpret_cast<int (*)(int, const char**)>(loadedImg.mainAddr);
+                if (!mainFn) {
+                    pr_err("elf", "%s: missing 'int main(int argc, const char** argv)' entry point", path);
+                    ElfLoader::unload(loadedImg);
+                    return Status::NotFound;
+                }
+
+                memset(tempSlot, 0, sizeof(LoadedModule));
+                tempSlot->inUse    = true;
+                tempSlot->id       = m_nextModuleId++;
+                tempSlot->codeBase = loadedImg.codeBase;
+                tempSlot->codeSize = loadedImg.totalBytes;
+                extractBaseName(path, tempSlot->name, sizeof(tempSlot->name));
+                str::copy(tempSlot->sourcePath, path, sizeof(tempSlot->sourcePath));
+
+                u32 prevMod = m_activeModuleId;
+                m_activeModuleId = tempSlot->id;
+
+                cortez_jmp_buf* jmpEnv = nullptr;
+                bool guarded = enterRecoveryGuard(&jmpEnv);
+                i32 exitCode = -1;
+
+                if (guarded && jmpEnv) {
+                    if (cortez_setjmp(*jmpEnv) == 0) {
+                        exitCode = mainFn(static_cast<int>(argc), argv);
+                    } else {
+                        kprintf("\033[1;31m[FAULT] Program '%s' terminated after CPU exception; recovered to shell.\033[0m\n",
+                                path);
+                        exitCode = -1;
+                    }
+                    leaveRecoveryGuard();
+                } else {
+                    exitCode = mainFn(static_cast<int>(argc), argv);
+                }
+
+                m_activeModuleId = prevMod;
+
+                cleanupModuleResources(*tempSlot);
+                ElfLoader::unload(loadedImg);
+                memset(tempSlot, 0, sizeof(LoadedModule));
+
+                if (outExitCode) {
+                    *outExitCode = exitCode;
+                }
+                return Status::Ok;
+            }
+        }
+        fs::VfsManager::instance().close(fd);
+    }
+
     TCCState* s = tcc_new();
     if (!s) return Status::OutOfMemory;
 
@@ -659,6 +835,36 @@ Status ModuleManager::checkCompile(const char* path) noexcept {
     }
 
     tcc_delete(s);
+    return Status::Ok;
+}
+
+Status ModuleManager::compileToElf(const char* srcPath, const char* outPath, usize* outBytes) noexcept {
+    if (!srcPath || !srcPath[0] || !outPath || !outPath[0]) return Status::InvalidArgument;
+
+    TCCState* s = tcc_new();
+    if (!s) return Status::OutOfMemory;
+
+    tcc_set_output_type(s, TCC_OUTPUT_OBJ);
+    tcc_set_error_func(s, const_cast<char*>(srcPath), &tccErrorCallback);
+    tcc_add_include_path(s, "/ext/include");
+    tcc_add_sysinclude_path(s, "/ext/include");
+    registerKernelSymbols(s);
+
+    if (tcc_add_file(s, srcPath) < 0) {
+        tcc_delete(s);
+        return Status::InvalidArgument;
+    }
+
+    int written = tcc_output_file(s, outPath);
+    tcc_delete(s);
+
+    if (written <= 0) {
+        return Status::IoError;
+    }
+
+    if (outBytes) {
+        *outBytes = static_cast<usize>(written);
+    }
     return Status::Ok;
 }
 

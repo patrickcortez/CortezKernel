@@ -44,6 +44,7 @@ int       tcc_compile_string(TCCState* s, const char* buf);
 
 /* Linking & in-memory relocation */
 int       tcc_set_output_type(TCCState* s, int output_type);
+int       tcc_output_file(TCCState* s, const char* filename);
 int       tcc_add_Symbol(TCCState* s, const char* name, const void* val);
 int       tcc_add_symbol(TCCState* s, const char* name, const void* val);
 int       tcc_relocate(TCCState* s1, void* ptr);

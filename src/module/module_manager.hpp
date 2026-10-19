@@ -67,6 +67,7 @@ public:
     Status unload(const char* name) noexcept;
     Status runProgram(const char* path, usize argc, const char** argv, i32* outExitCode = nullptr) noexcept;
     Status checkCompile(const char* path) noexcept;
+    Status compileToElf(const char* srcPath, const char* outPath, usize* outBytes = nullptr) noexcept;
     usize  autoload(const char* dirPath) noexcept;
 
     // Resource registration hooks called by kapi.cpp

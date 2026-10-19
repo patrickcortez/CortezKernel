@@ -12,6 +12,8 @@
 #include "../drivers/video/terminal_driver.hpp"
 #include "../proc/scheduler.hpp"
 #include "../fs/vfs_manager.hpp"
+#include "../fs/path_resolver.hpp"
+#include "../module/module_manager.hpp"
 #include "../lib/string_utils.hpp"
 #include "../lib/printk.hpp"
 
@@ -221,6 +223,46 @@ void Shell::executeLine(char* line) noexcept {
             if (st != Status::Ok && st != Status::InvalidArgument) {
                 kprintf("\033[31m%s: %s\033[0m\n", args.argv[0], statusToString(st));
             }
+            return;
+        }
+    }
+
+    // Direct executable path execution: ./prog, /bin/prog, or a file with a path
+    const char* cmd = args.argv[0];
+    bool isPathExecution = (cmd[0] == '/' || (cmd[0] == '.' && cmd[1] == '/'));
+
+    if (isPathExecution) {
+        const proc::Task* t   = proc::Scheduler::instance().getCurrentTask();
+        const char*       cwd = t ? t->getCwd() : "/";
+
+        char fullPath[256]{};
+        fs::PathResolver::normalize(cwd, cmd, fullPath, sizeof(fullPath));
+
+        fs::FileStat fst{};
+        if (fs::VfsManager::instance().stat(cwd, fullPath, &fst) == Status::Ok) {
+            if (fst.type == fs::NodeType::Directory) {
+                kprintf("\033[31mcortez-sh: %s: Is a directory\033[0m\n", cmd);
+                return;
+            }
+
+            const char* progArgv[CommandArgs::MAX_ARGS]{};
+            usize progArgc = args.argc;
+            for (usize a = 0; a < progArgc; ++a) {
+                progArgv[a] = args.argv[a];
+            }
+
+            i32 exitCode = 0;
+            Status runSt = module::ModuleManager::instance().runProgram(fullPath, progArgc, progArgv, &exitCode);
+            if (runSt == Status::Ok) {
+                if (exitCode != 0) {
+                    kprintf("\033[33m[%s] exited with code %d\033[0m\n", cmd, exitCode);
+                }
+            } else {
+                kprintf("\033[31m%s: execution failed: %s\033[0m\n", cmd, statusToString(runSt));
+            }
+            return;
+        } else {
+            kprintf("\033[31mcortez-sh: %s: No such file or directory\033[0m\n", cmd);
             return;
         }
     }

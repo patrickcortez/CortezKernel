@@ -109,4 +109,9 @@ namespace cortez::module {
  */
 void registerKernelSymbols(TCCState* s) noexcept;
 
+/**
+ * @brief Looks up a kernel API or standard C library function address by symbol name.
+ */
+const void* lookupKernelSymbol(const char* name) noexcept;
+
 } // namespace cortez::module

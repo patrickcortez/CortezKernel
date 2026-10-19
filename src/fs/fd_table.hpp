@@ -19,6 +19,10 @@ enum OpenFlags : u32 {
     O_APPEND = 0x0400U
 };
 
+constexpr i32 SEEK_SET = 0;
+constexpr i32 SEEK_CUR = 1;
+constexpr i32 SEEK_END = 2;
+
 struct FileHandle {
     bool                  inUse      = false;
     u32                   flags      = 0;

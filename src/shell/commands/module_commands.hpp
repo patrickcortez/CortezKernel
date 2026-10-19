@@ -44,8 +44,8 @@ public:
 class CcCommand final : public IShellCommand {
 public:
     const char* getName() const noexcept override { return "cc"; }
-    const char* getUsage() const noexcept override { return "cc <file.c>"; }
-    const char* getDescription() const noexcept override { return "Syntax-check and test-compile a C source file"; }
+    const char* getUsage() const noexcept override { return "cc <file.c> [-o <outfile>]"; }
+    const char* getDescription() const noexcept override { return "Compile a C source file to an on-disk ELF64 executable"; }
     Status      execute(const CommandArgs& args) override;
 };
 

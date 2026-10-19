@@ -329,96 +329,120 @@ void k_delay_us(uint64_t us) {
 
 namespace cortez::module {
 
-void registerKernelSymbols(TCCState* s) noexcept {
-    if (!s) return;
+namespace {
 
+struct KernelSymbolEntry {
+    const char* name;
+    const void* addr;
+};
+
+const KernelSymbolEntry s_kernelSymbols[] = {
     // 1. Console & Logging
-    tcc_add_symbol(s, "k_printf",  reinterpret_cast<const void*>(&k_printf));
-    tcc_add_symbol(s, "k_log",     reinterpret_cast<const void*>(&k_log));
-    tcc_add_symbol(s, "k_getchar", reinterpret_cast<const void*>(&k_getchar));
-    tcc_add_symbol(s, "k_kbhit",   reinterpret_cast<const void*>(&k_kbhit));
+    { "k_printf",  reinterpret_cast<const void*>(&k_printf) },
+    { "k_log",     reinterpret_cast<const void*>(&k_log) },
+    { "k_getchar", reinterpret_cast<const void*>(&k_getchar) },
+    { "k_kbhit",   reinterpret_cast<const void*>(&k_kbhit) },
 
     // 2. Memory Management
-    tcc_add_symbol(s, "k_malloc",       reinterpret_cast<const void*>(&k_malloc));
-    tcc_add_symbol(s, "k_calloc",       reinterpret_cast<const void*>(&k_calloc));
-    tcc_add_symbol(s, "k_realloc",      reinterpret_cast<const void*>(&k_realloc));
-    tcc_add_symbol(s, "k_free",         reinterpret_cast<const void*>(&k_free));
-    tcc_add_symbol(s, "k_alloc_pages",  reinterpret_cast<const void*>(&k_alloc_pages));
-    tcc_add_symbol(s, "k_free_pages",   reinterpret_cast<const void*>(&k_free_pages));
-    tcc_add_symbol(s, "k_phys_to_virt", reinterpret_cast<const void*>(&k_phys_to_virt));
-    tcc_add_symbol(s, "k_virt_to_phys", reinterpret_cast<const void*>(&k_virt_to_phys));
-    tcc_add_symbol(s, "k_map_mmio",     reinterpret_cast<const void*>(&k_map_mmio));
+    { "k_malloc",       reinterpret_cast<const void*>(&k_malloc) },
+    { "k_calloc",       reinterpret_cast<const void*>(&k_calloc) },
+    { "k_realloc",      reinterpret_cast<const void*>(&k_realloc) },
+    { "k_free",         reinterpret_cast<const void*>(&k_free) },
+    { "k_alloc_pages",  reinterpret_cast<const void*>(&k_alloc_pages) },
+    { "k_free_pages",   reinterpret_cast<const void*>(&k_free_pages) },
+    { "k_phys_to_virt", reinterpret_cast<const void*>(&k_phys_to_virt) },
+    { "k_virt_to_phys", reinterpret_cast<const void*>(&k_virt_to_phys) },
+    { "k_map_mmio",     reinterpret_cast<const void*>(&k_map_mmio) },
 
     // 3. Port I/O
-    tcc_add_symbol(s, "k_inb",     reinterpret_cast<const void*>(&k_inb));
-    tcc_add_symbol(s, "k_outb",    reinterpret_cast<const void*>(&k_outb));
-    tcc_add_symbol(s, "k_inw",     reinterpret_cast<const void*>(&k_inw));
-    tcc_add_symbol(s, "k_outw",    reinterpret_cast<const void*>(&k_outw));
-    tcc_add_symbol(s, "k_inl",     reinterpret_cast<const void*>(&k_inl));
-    tcc_add_symbol(s, "k_outl",    reinterpret_cast<const void*>(&k_outl));
-    tcc_add_symbol(s, "k_io_wait", reinterpret_cast<const void*>(&k_io_wait));
+    { "k_inb",     reinterpret_cast<const void*>(&k_inb) },
+    { "k_outb",    reinterpret_cast<const void*>(&k_outb) },
+    { "k_inw",     reinterpret_cast<const void*>(&k_inw) },
+    { "k_outw",    reinterpret_cast<const void*>(&k_outw) },
+    { "k_inl",     reinterpret_cast<const void*>(&k_inl) },
+    { "k_outl",    reinterpret_cast<const void*>(&k_outl) },
+    { "k_io_wait", reinterpret_cast<const void*>(&k_io_wait) },
 
     // 4. Interrupts & APIC
-    tcc_add_symbol(s, "k_irq_alloc_vector", reinterpret_cast<const void*>(&k_irq_alloc_vector));
-    tcc_add_symbol(s, "k_irq_register",     reinterpret_cast<const void*>(&k_irq_register));
-    tcc_add_symbol(s, "k_irq_route_isa",    reinterpret_cast<const void*>(&k_irq_route_isa));
-    tcc_add_symbol(s, "k_irq_unregister",   reinterpret_cast<const void*>(&k_irq_unregister));
+    { "k_irq_alloc_vector", reinterpret_cast<const void*>(&k_irq_alloc_vector) },
+    { "k_irq_register",     reinterpret_cast<const void*>(&k_irq_register) },
+    { "k_irq_route_isa",    reinterpret_cast<const void*>(&k_irq_route_isa) },
+    { "k_irq_unregister",   reinterpret_cast<const void*>(&k_irq_unregister) },
 
     // 5. PCI / PCIe
-    tcc_add_symbol(s, "k_pci_count",            reinterpret_cast<const void*>(&k_pci_count));
-    tcc_add_symbol(s, "k_pci_get",              reinterpret_cast<const void*>(&k_pci_get));
-    tcc_add_symbol(s, "k_pci_read32",           reinterpret_cast<const void*>(&k_pci_read32));
-    tcc_add_symbol(s, "k_pci_write32",          reinterpret_cast<const void*>(&k_pci_write32));
-    tcc_add_symbol(s, "k_pci_enable_busmaster", reinterpret_cast<const void*>(&k_pci_enable_busmaster));
-    tcc_add_symbol(s, "k_pci_enable_msi",       reinterpret_cast<const void*>(&k_pci_enable_msi));
+    { "k_pci_count",            reinterpret_cast<const void*>(&k_pci_count) },
+    { "k_pci_get",              reinterpret_cast<const void*>(&k_pci_get) },
+    { "k_pci_read32",           reinterpret_cast<const void*>(&k_pci_read32) },
+    { "k_pci_write32",          reinterpret_cast<const void*>(&k_pci_write32) },
+    { "k_pci_enable_busmaster", reinterpret_cast<const void*>(&k_pci_enable_busmaster) },
+    { "k_pci_enable_msi",       reinterpret_cast<const void*>(&k_pci_enable_msi) },
 
     // 6. Commands & Char Devices
-    tcc_add_symbol(s, "k_register_command",   reinterpret_cast<const void*>(&k_register_command));
-    tcc_add_symbol(s, "k_unregister_command", reinterpret_cast<const void*>(&k_unregister_command));
-    tcc_add_symbol(s, "k_register_chardev",   reinterpret_cast<const void*>(&k_register_chardev));
-    tcc_add_symbol(s, "k_unregister_chardev", reinterpret_cast<const void*>(&k_unregister_chardev));
+    { "k_register_command",   reinterpret_cast<const void*>(&k_register_command) },
+    { "k_unregister_command", reinterpret_cast<const void*>(&k_unregister_command) },
+    { "k_register_chardev",   reinterpret_cast<const void*>(&k_register_chardev) },
+    { "k_unregister_chardev", reinterpret_cast<const void*>(&k_unregister_chardev) },
 
     // 7. VFS
-    tcc_add_symbol(s, "k_open",  reinterpret_cast<const void*>(&k_open));
-    tcc_add_symbol(s, "k_read",  reinterpret_cast<const void*>(&k_read));
-    tcc_add_symbol(s, "k_write", reinterpret_cast<const void*>(&k_write));
-    tcc_add_symbol(s, "k_lseek", reinterpret_cast<const void*>(&k_lseek));
-    tcc_add_symbol(s, "k_close", reinterpret_cast<const void*>(&k_close));
+    { "k_open",  reinterpret_cast<const void*>(&k_open) },
+    { "k_read",  reinterpret_cast<const void*>(&k_read) },
+    { "k_write", reinterpret_cast<const void*>(&k_write) },
+    { "k_lseek", reinterpret_cast<const void*>(&k_lseek) },
+    { "k_close", reinterpret_cast<const void*>(&k_close) },
 
     // 8. Scheduler & Timing
-    tcc_add_symbol(s, "k_task_spawn", reinterpret_cast<const void*>(&k_task_spawn));
-    tcc_add_symbol(s, "k_task_kill",  reinterpret_cast<const void*>(&k_task_kill));
-    tcc_add_symbol(s, "k_yield",      reinterpret_cast<const void*>(&k_yield));
-    tcc_add_symbol(s, "k_sleep_ms",   reinterpret_cast<const void*>(&k_sleep_ms));
-    tcc_add_symbol(s, "k_ticks",      reinterpret_cast<const void*>(&k_ticks));
-    tcc_add_symbol(s, "k_delay_us",   reinterpret_cast<const void*>(&k_delay_us));
+    { "k_task_spawn", reinterpret_cast<const void*>(&k_task_spawn) },
+    { "k_task_kill",  reinterpret_cast<const void*>(&k_task_kill) },
+    { "k_yield",      reinterpret_cast<const void*>(&k_yield) },
+    { "k_sleep_ms",   reinterpret_cast<const void*>(&k_sleep_ms) },
+    { "k_ticks",      reinterpret_cast<const void*>(&k_ticks) },
+    { "k_delay_us",   reinterpret_cast<const void*>(&k_delay_us) },
 
     // 9. Standard C library aliases (stdio.h, stdlib.h, string.h)
-    tcc_add_symbol(s, "printf",     reinterpret_cast<const void*>(&k_printf));
-    tcc_add_symbol(s, "snprintf",   reinterpret_cast<const void*>(&klibc_snprintf));
-    tcc_add_symbol(s, "sprintf",    reinterpret_cast<const void*>(&klibc_sprintf));
-    tcc_add_symbol(s, "malloc",     reinterpret_cast<const void*>(&klibc_malloc));
-    tcc_add_symbol(s, "calloc",     reinterpret_cast<const void*>(&klibc_calloc));
-    tcc_add_symbol(s, "realloc",    reinterpret_cast<const void*>(&klibc_realloc));
-    tcc_add_symbol(s, "free",       reinterpret_cast<const void*>(&klibc_free));
-    tcc_add_symbol(s, "atoi",       reinterpret_cast<const void*>(&klibc_atoi));
-    tcc_add_symbol(s, "strtol",     reinterpret_cast<const void*>(&klibc_strtol));
-    tcc_add_symbol(s, "strtoul",    reinterpret_cast<const void*>(&klibc_strtoul));
-    tcc_add_symbol(s, "strlen",     reinterpret_cast<const void*>(&klibc_strlen));
-    tcc_add_symbol(s, "strcpy",     reinterpret_cast<const void*>(&klibc_strcpy));
-    tcc_add_symbol(s, "strncpy",    reinterpret_cast<const void*>(&klibc_strncpy));
-    tcc_add_symbol(s, "strcat",     reinterpret_cast<const void*>(&klibc_strcat));
-    tcc_add_symbol(s, "strcmp",     reinterpret_cast<const void*>(&klibc_strcmp));
-    tcc_add_symbol(s, "strncmp",    reinterpret_cast<const void*>(&klibc_strncmp));
-    tcc_add_symbol(s, "strcasecmp", reinterpret_cast<const void*>(&klibc_strcasecmp));
-    tcc_add_symbol(s, "strchr",     reinterpret_cast<const void*>(&klibc_strchr));
-    tcc_add_symbol(s, "strrchr",    reinterpret_cast<const void*>(&klibc_strrchr));
-    tcc_add_symbol(s, "strstr",     reinterpret_cast<const void*>(&klibc_strstr));
-    tcc_add_symbol(s, "strdup",     reinterpret_cast<const void*>(&klibc_strdup));
-    tcc_add_symbol(s, "memcpy",     reinterpret_cast<const void*>(&memcpy));
-    tcc_add_symbol(s, "memset",     reinterpret_cast<const void*>(&memset));
-    tcc_add_symbol(s, "memmove",    reinterpret_cast<const void*>(&memmove));
-    tcc_add_symbol(s, "memcmp",     reinterpret_cast<const void*>(&memcmp));
+    { "printf",     reinterpret_cast<const void*>(&k_printf) },
+    { "snprintf",   reinterpret_cast<const void*>(&klibc_snprintf) },
+    { "sprintf",    reinterpret_cast<const void*>(&klibc_sprintf) },
+    { "malloc",     reinterpret_cast<const void*>(&klibc_malloc) },
+    { "calloc",     reinterpret_cast<const void*>(&klibc_calloc) },
+    { "realloc",    reinterpret_cast<const void*>(&klibc_realloc) },
+    { "free",       reinterpret_cast<const void*>(&klibc_free) },
+    { "atoi",       reinterpret_cast<const void*>(&klibc_atoi) },
+    { "strtol",     reinterpret_cast<const void*>(&klibc_strtol) },
+    { "strtoul",    reinterpret_cast<const void*>(&klibc_strtoul) },
+    { "strlen",     reinterpret_cast<const void*>(&klibc_strlen) },
+    { "strcpy",     reinterpret_cast<const void*>(&klibc_strcpy) },
+    { "strncpy",    reinterpret_cast<const void*>(&klibc_strncpy) },
+    { "strcat",     reinterpret_cast<const void*>(&klibc_strcat) },
+    { "strcmp",     reinterpret_cast<const void*>(&klibc_strcmp) },
+    { "strncmp",    reinterpret_cast<const void*>(&klibc_strncmp) },
+    { "strcasecmp", reinterpret_cast<const void*>(&klibc_strcasecmp) },
+    { "strchr",     reinterpret_cast<const void*>(&klibc_strchr) },
+    { "strrchr",    reinterpret_cast<const void*>(&klibc_strrchr) },
+    { "strstr",     reinterpret_cast<const void*>(&klibc_strstr) },
+    { "strdup",     reinterpret_cast<const void*>(&klibc_strdup) },
+    { "memcpy",     reinterpret_cast<const void*>(&memcpy) },
+    { "memset",     reinterpret_cast<const void*>(&memset) },
+    { "memmove",    reinterpret_cast<const void*>(&memmove) },
+    { "memcmp",     reinterpret_cast<const void*>(&memcmp) },
+};
+
+} // namespace
+
+void registerKernelSymbols(TCCState* s) noexcept {
+    if (!s) return;
+    for (const auto& entry : s_kernelSymbols) {
+        tcc_add_symbol(s, entry.name, entry.addr);
+    }
+}
+
+const void* lookupKernelSymbol(const char* name) noexcept {
+    if (!name || !name[0]) return nullptr;
+    for (const auto& entry : s_kernelSymbols) {
+        if (str::compare(entry.name, name) == 0) {
+            return entry.addr;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace cortez::module
