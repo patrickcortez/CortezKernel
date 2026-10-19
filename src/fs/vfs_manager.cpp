@@ -104,6 +104,27 @@ Result<usize> VfsManager::write(i32 fd, const void* buffer, usize count) noexcep
     return res;
 }
 
+Result<u64> VfsManager::seek(i32 fd, i64 offset, i32 whence) noexcept {
+    FileHandle* fh = m_fdTable.getHandle(fd);
+    if (!fh || !fh->vfsNode) return Status::BadFileDescriptor;
+
+    i64 base = 0;
+    if (whence == 0) { // SEEK_SET
+        base = 0;
+    } else if (whence == 1) { // SEEK_CUR
+        base = static_cast<i64>(fh->offset);
+    } else if (whence == 2) { // SEEK_END
+        base = static_cast<i64>(fh->vfsNode->getSize());
+    } else {
+        return Status::InvalidArgument;
+    }
+
+    i64 target = base + offset;
+    if (target < 0) return Status::InvalidArgument;
+    fh->offset = static_cast<u64>(target);
+    return fh->offset;
+}
+
 Status VfsManager::createFile(const char* cwd, const char* path) noexcept {
     if (!m_rootFs || !path || !path[0]) return Status::InvalidArgument;
 

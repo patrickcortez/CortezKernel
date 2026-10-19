@@ -42,6 +42,8 @@ void KernelCmdline::parse(const char* rawCmdline) noexcept {
             m_readWrite = false;
         } else if (str::compare(token, "rw") == 0) {
             m_readWrite = true;
+        } else if (str::compare(token, "cortez.noext") == 0 || str::compare(token, "noext") == 0) {
+            m_noExt = true;
         }
     }
 }

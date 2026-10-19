@@ -17,6 +17,7 @@ public:
 
     Status init(memory::IVirtualMapper* vmm) noexcept;
     void   routeIsaIrq(u8 isaIrq, u8 vector, bool masked = false) noexcept;
+    void   maskIsaIrq(u8 isaIrq) noexcept;
     void   sendEoi() noexcept;
 
     void   onInterrupt(InterruptFrame* frame) noexcept override;

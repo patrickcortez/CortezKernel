@@ -29,7 +29,7 @@ struct FileHandle {
 
 class FdTable final {
 public:
-    static constexpr usize MAX_OPEN_FDS = 32;
+    static constexpr usize MAX_OPEN_FDS = 64;
 
     FdTable() noexcept = default;
 

@@ -115,6 +115,24 @@ CORTEZ_ALWAYS_INLINE CpuidResult cpuid(u32 leaf, u32 subleaf = 0) noexcept {
     return res;
 }
 
+extern "C" {
+void cortez_enable_fpu_sse() noexcept;
+void cortez_fxsave(void* state512) noexcept;
+void cortez_fxrstor(const void* state512) noexcept;
+}
+
+CORTEZ_ALWAYS_INLINE void enableFpuSse() noexcept {
+    cortez_enable_fpu_sse();
+}
+
+CORTEZ_ALWAYS_INLINE void fxsave(void* state512) noexcept {
+    cortez_fxsave(state512);
+}
+
+CORTEZ_ALWAYS_INLINE void fxrstor(const void* state512) noexcept {
+    cortez_fxrstor(state512);
+}
+
 CORTEZ_NORETURN CORTEZ_ALWAYS_INLINE void haltForever() noexcept {
     cli();
     for (;;) {

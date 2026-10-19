@@ -97,4 +97,20 @@ public:
     Status      execute(const CommandArgs& args) override;
 };
 
+class HistoryCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "history"; }
+    const char* getUsage() const noexcept override { return "history"; }
+    const char* getDescription() const noexcept override { return "Display shell command history (Up/Down arrow buffer)"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
+class EditCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "edit"; }
+    const char* getUsage() const noexcept override { return "edit <file>"; }
+    const char* getDescription() const noexcept override { return "Full-screen interactive text editor (^S Save, ^X Exit)"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
 } // namespace cortez::shell::commands

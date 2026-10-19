@@ -68,13 +68,15 @@ ASM_SRCS := \
     src/crt/crt0.asm \
     src/arch/x86_64/gdt_flush.asm \
     src/arch/x86_64/isr_stubs.asm \
-    src/proc/context_switch.asm
+    src/proc/context_switch.asm \
+    src/klibc/setjmp.asm
 
 CPP_SRCS := \
     src/crt/icxxabi.cpp \
     src/crt/new_delete.cpp \
     src/lib/string_utils.cpp \
     src/lib/printk.cpp \
+    src/klibc/klibc.cpp \
     src/boot/boot_info.cpp \
     src/boot/cmdline.cpp \
     src/arch/x86_64/gdt.cpp \
@@ -85,6 +87,7 @@ CPP_SRCS := \
     src/memory/pmm_bitmap.cpp \
     src/memory/vmm_pager.cpp \
     src/memory/heap_allocator.cpp \
+    src/memory/module_area.cpp \
     src/drivers/device_registry.cpp \
     src/drivers/video/gop_framebuffer.cpp \
     src/drivers/video/terminal_driver.cpp \
@@ -100,14 +103,23 @@ CPP_SRCS := \
     src/fs/exfat/exfat_fs.cpp \
     src/fs/vfs_manager.cpp \
     src/proc/scheduler.cpp \
+    src/module/kapi.cpp \
+    src/module/module_manager.cpp \
+    src/shell/line_editor.cpp \
+    src/shell/text_editor.cpp \
     src/shell/commands/fs_commands.cpp \
     src/shell/commands/sys_commands.cpp \
+    src/shell/commands/module_commands.cpp \
     src/shell/shell.cpp \
     src/kernel/kernel.cpp
 
+TCC_SRCS := \
+    third_party/tinycc/libtcc.cpp
+
 ASM_OBJS := $(patsubst src/%.asm,$(BUILD_DIR)/%.asm.o,$(ASM_SRCS))
 CPP_OBJS := $(patsubst src/%.cpp,$(BUILD_DIR)/%.cpp.o,$(CPP_SRCS))
-ALL_OBJS := $(ASM_OBJS) $(CPP_OBJS)
+TCC_OBJS := $(patsubst third_party/%.cpp,$(BUILD_DIR)/third_party/%.cpp.o,$(TCC_SRCS))
+ALL_OBJS := $(ASM_OBJS) $(CPP_OBJS) $(TCC_OBJS)
 
 .PHONY: all image run run-usb clean
 
@@ -118,6 +130,10 @@ $(BUILD_DIR)/%.asm.o: src/%.asm
 	$(NASM) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/%.cpp.o: src/%.cpp
+	@$(PYTHON) -c "import os; os.makedirs(os.path.dirname('$@'), exist_ok=True)"
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/third_party/%.cpp.o: third_party/%.cpp
 	@$(PYTHON) -c "import os; os.makedirs(os.path.dirname('$@'), exist_ok=True)"
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -145,4 +161,4 @@ clean:
 	@$(PYTHON) -c "import shutil; shutil.rmtree('$(BUILD_DIR)', ignore_errors=True)"
 
 # Auto-generated header dependencies (from -MMD -MP)
--include $(CPP_OBJS:.o=.d)
+-include $(CPP_OBJS:.o=.d) $(TCC_OBJS:.o=.d)

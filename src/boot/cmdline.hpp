@@ -20,6 +20,7 @@ public:
     const char* getConsole() const noexcept { return m_console; }
     const char* getRaw() const noexcept { return m_raw; }
     bool        isReadWrite() const noexcept { return m_readWrite; }
+    bool        isNoExt() const noexcept { return m_noExt; }
 
 private:
     KernelCmdline() noexcept = default;
@@ -29,6 +30,7 @@ private:
     char m_rootFsType[32]  = "auto";
     char m_console[32]     = "tty0";
     bool m_readWrite       = true;
+    bool m_noExt           = false;
 };
 
 } // namespace cortez::boot

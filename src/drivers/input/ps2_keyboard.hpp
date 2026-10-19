@@ -13,7 +13,7 @@ namespace cortez::drivers::input {
 
 class Ps2KeyboardDriver final : public ICharDevice, public arch::IInterruptHandler {
 public:
-    static constexpr usize KEY_BUFFER_CAPACITY = 256;
+    static constexpr usize KEY_BUFFER_CAPACITY = 512;
 
     static Ps2KeyboardDriver& instance() noexcept;
 
@@ -32,15 +32,18 @@ private:
     Ps2KeyboardDriver() noexcept = default;
 
     void processScancode(u8 scancode) noexcept;
+    void pushSequence(const char* seq) noexcept;
     bool waitInputReady() const noexcept;
     bool waitOutputReady() const noexcept;
 
     RingBuffer<char, KEY_BUFFER_CAPACITY> m_buffer{};
-    bool m_leftShift  = false;
-    bool m_rightShift = false;
-    bool m_ctrlHeld   = false;
-    bool m_capsLock   = false;
-    bool m_extendedE0 = false;
+    bool m_leftShift     = false;
+    bool m_rightShift    = false;
+    bool m_leftCtrlHeld  = false;
+    bool m_rightCtrlHeld = false;
+    bool m_ctrlHeld      = false;
+    bool m_capsLock      = false;
+    bool m_extendedE0    = false;
 };
 
 } // namespace cortez::drivers::input

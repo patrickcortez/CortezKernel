@@ -55,6 +55,7 @@ public:
     virtual ~IHeapAllocator() = default;
 
     virtual void* allocate(usize size, usize alignment = 16) noexcept = 0;
+    virtual void* reallocate(void* ptr, usize newSize, usize alignment = 16) noexcept = 0;
     virtual void  deallocate(void* ptr) noexcept = 0;
     virtual usize getUsedBytes() const noexcept = 0;
     virtual usize getTotalBytes() const noexcept = 0;

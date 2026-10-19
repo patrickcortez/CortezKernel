@@ -25,6 +25,20 @@ Status DeviceRegistry::registerBlockDevice(IBlockDevice* dev) noexcept {
     return Status::Ok;
 }
 
+Status DeviceRegistry::unregisterBlockDevice(IBlockDevice* dev) noexcept {
+    if (!dev) return Status::InvalidArgument;
+    for (usize i = 0; i < m_blockCount; ++i) {
+        if (m_blockDevices[i] == dev) {
+            for (usize j = i; j + 1 < m_blockCount; ++j) {
+                m_blockDevices[j] = m_blockDevices[j + 1];
+            }
+            m_blockDevices[--m_blockCount] = nullptr;
+            return Status::Ok;
+        }
+    }
+    return Status::NotFound;
+}
+
 Status DeviceRegistry::registerCharDevice(ICharDevice* dev) noexcept {
     if (!dev || !dev->getName()) return Status::InvalidArgument;
     if (m_charCount >= MAX_CHAR_DEVICES) return Status::NoSpace;
@@ -35,6 +49,20 @@ Status DeviceRegistry::registerCharDevice(ICharDevice* dev) noexcept {
     }
     m_charDevices[m_charCount++] = dev;
     return Status::Ok;
+}
+
+Status DeviceRegistry::unregisterCharDevice(ICharDevice* dev) noexcept {
+    if (!dev) return Status::InvalidArgument;
+    for (usize i = 0; i < m_charCount; ++i) {
+        if (m_charDevices[i] == dev) {
+            for (usize j = i; j + 1 < m_charCount; ++j) {
+                m_charDevices[j] = m_charDevices[j + 1];
+            }
+            m_charDevices[--m_charCount] = nullptr;
+            return Status::Ok;
+        }
+    }
+    return Status::NotFound;
 }
 
 IBlockDevice* DeviceRegistry::findBlockDevice(const char* name) const noexcept {

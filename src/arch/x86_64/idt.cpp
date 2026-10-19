@@ -7,6 +7,7 @@
 #include "gdt.hpp"
 #include "apic.hpp"
 #include "cpu.hpp"
+#include "../../module/module_manager.hpp"
 #include "../../lib/string_utils.hpp"
 #include "../../lib/printk.hpp"
 
@@ -69,6 +70,7 @@ void IdtManager::setGate(u8 vector, virt_addr_t isrAddr, u8 ist, u8 typeAttr) no
 void IdtManager::init() noexcept {
     memset(m_idt, 0, sizeof(m_idt));
     memset(m_handlers, 0, sizeof(m_handlers));
+    memset(m_vectorUsed, 0, sizeof(m_vectorUsed));
 
     for (u32 vec = 0; vec < IDT_ENTRIES; ++vec) {
         u8 ist = 0;
@@ -87,13 +89,38 @@ void IdtManager::init() noexcept {
 }
 
 void IdtManager::registerHandler(u8 vector, IInterruptHandler* handler) noexcept {
-    m_handlers[vector] = handler;
+    m_handlers[vector]   = handler;
+    m_vectorUsed[vector] = (handler != nullptr);
+}
+
+void IdtManager::unregisterHandler(u8 vector) noexcept {
+    m_handlers[vector] = nullptr;
+}
+
+i32 IdtManager::allocateVector() noexcept {
+    for (u32 v = VEC_DYN_START; v <= VEC_DYN_END; ++v) {
+        if (!m_vectorUsed[v] && !m_handlers[v]) {
+            m_vectorUsed[v] = true;
+            return static_cast<i32>(v);
+        }
+    }
+    return -1;
+}
+
+void IdtManager::freeVector(u8 vector) noexcept {
+    if (vector >= VEC_DYN_START && vector <= VEC_DYN_END) {
+        m_handlers[vector]   = nullptr;
+        m_vectorUsed[vector] = false;
+    }
 }
 
 void IdtManager::dispatch(InterruptFrame* frame) noexcept {
     u8 vec = static_cast<u8>(frame->vector & 0xFFULL);
 
     if (vec < 32) {
+        if (vec != 8 && module::ModuleManager::instance().handleException(frame, kExceptionNames[vec])) {
+            return;
+        }
         u64 cr2 = readCr2();
         pr_err("PANIC", "CPU Exception %u: %s", vec, kExceptionNames[vec]);
         pr_err("PANIC", "RIP=0x%016llx RSP=0x%016llx ERR=0x%llx CR2=0x%016llx",

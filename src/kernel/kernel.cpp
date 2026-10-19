@@ -15,6 +15,7 @@
 #include "../memory/pmm_bitmap.hpp"
 #include "../memory/vmm_pager.hpp"
 #include "../memory/heap_allocator.hpp"
+#include "../memory/module_area.hpp"
 #include "../drivers/i_device.hpp"
 #include "../drivers/video/terminal_driver.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
@@ -24,6 +25,7 @@
 #include "../fs/vfs_manager.hpp"
 #include "../proc/scheduler.hpp"
 #include "../shell/shell.hpp"
+#include "../module/module_manager.hpp"
 #include "../lib/printk.hpp"
 #include "../lib/string_utils.hpp"
 
@@ -53,6 +55,8 @@ void Kernel::setupArch() noexcept {
 
     arch::GdtManager::instance().init();
     arch::IdtManager::instance().init();
+    arch::enableFpuSse();
+    pr_ok("cpu", "Enabled x87 FPU and SSE/SSE2 instructions (CR0.EM=0, CR4.OSFXSR=1)");
 }
 
 void Kernel::mmInit() noexcept {
@@ -71,6 +75,11 @@ void Kernel::mmInit() noexcept {
 
     if (memory::KernelHeap::instance().init(&memory::BitmapPmm::instance(), hhdm) != Status::Ok) {
         pr_err("PANIC", "Failed to initialize Kernel Heap Allocator");
+        arch::haltForever();
+    }
+
+    if (memory::ModuleArea::instance().init(&memory::BitmapPmm::instance(), &memory::PageTableVmm::instance()) != Status::Ok) {
+        pr_err("PANIC", "Failed to initialize Executable Module Area");
         arch::haltForever();
     }
 }
@@ -168,6 +177,18 @@ void Kernel::kernelInitTask() {
     Kernel::instance().mountBlockRoot();
 
     shell::Shell::instance().init();
+
+    if (fs::VfsManager::instance().isRootMounted()) {
+        if (boot::KernelCmdline::instance().isNoExt()) {
+            pr_warn("ext", "Boot flag 'noext' detected; skipping /ext C module autoload");
+        } else {
+            pr_info("ext", "Autoloading C kernel extensions from /ext/drivers and /ext/commands...");
+            usize drvCount = module::ModuleManager::instance().autoload("/ext/drivers");
+            usize cmdCount = module::ModuleManager::instance().autoload("/ext/commands");
+            pr_ok("ext", "Autoloaded %zu C driver(s) and %zu C command module(s)", drvCount, cmdCount);
+        }
+    }
+
     shell::Shell::instance().runInteractiveLoop();
 }
 

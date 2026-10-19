@@ -30,6 +30,12 @@ public:
     void putChar(char c) noexcept;
     void drawCursor(bool visible) noexcept;
 
+    u32  getCols() const noexcept { return m_cols; }
+    u32  getRows() const noexcept { return m_rows; }
+    u32  getCursorCol() const noexcept { return m_cursorCol; }
+    u32  getCursorRow() const noexcept { return m_cursorRow; }
+    void setCursorPos(u32 col, u32 row) noexcept;
+
 private:
     struct Cell {
         char ch;
@@ -42,17 +48,23 @@ private:
     void scrollUp() noexcept;
     void handleAnsiChar(char c) noexcept;
     void applyAnsiCode(u32 code) noexcept;
+    void moveCursorLeft(u32 count) noexcept;
+    void moveCursorRight(u32 count) noexcept;
+    void eraseInLine(u32 mode) noexcept;
 
     GopFramebuffer m_fb{};
-    u32            m_cols       = 80;
-    u32            m_rows       = 25;
-    u32            m_cursorCol  = 0;
-    u32            m_cursorRow  = 0;
-    u32            m_fgColor    = DEFAULT_FG_COLOR;
-    u32            m_bgColor    = DEFAULT_BG_COLOR;
+    u32            m_cols          = 80;
+    u32            m_rows          = 25;
+    u32            m_cursorCol     = 0;
+    u32            m_cursorRow     = 0;
+    u32            m_fgColor       = DEFAULT_FG_COLOR;
+    u32            m_bgColor       = DEFAULT_BG_COLOR;
+    bool           m_cursorVisible = true;
 
     enum class AnsiState : u8 { Normal, Escape, Bracket } m_ansiState = AnsiState::Normal;
-    u32  m_ansiParam = 0;
+    u32  m_ansiParams[4]{};
+    u8   m_ansiParamCount = 0;
+    bool m_ansiPrivate    = false;
 
     Cell m_grid[MAX_ROWS][MAX_COLS]{};
 };

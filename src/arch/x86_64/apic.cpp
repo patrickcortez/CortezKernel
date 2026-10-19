@@ -149,6 +149,15 @@ void ApicController::routeIsaIrq(u8 isaIrq, u8 vector, bool masked) noexcept {
     writeIoApic(regLow, static_cast<u32>(redir & 0xFFFFFFFFULL));
 }
 
+void ApicController::maskIsaIrq(u8 isaIrq) noexcept {
+    if (!m_ioApicMmio) return;
+    u16 isoFlags = 0;
+    u32 gsi      = AcpiManager::instance().resolveIrqToGsi(isaIrq, &isoFlags);
+    u8 regLow    = static_cast<u8>(0x10U + gsi * 2U);
+    u32 lowVal   = readIoApic(regLow);
+    writeIoApic(regLow, lowVal | (1U << 16));
+}
+
 void ApicController::calibrateAndStartTimer() noexcept {
     // Divide by 16
     writeLapic(LAPIC_REG_TIMER_DIV, 0x03U);

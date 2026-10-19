@@ -5,6 +5,8 @@
 
 #include "sys_commands.hpp"
 #include "../shell.hpp"
+#include "../line_editor.hpp"
+#include "../text_editor.hpp"
 #include "../../drivers/i_device.hpp"
 #include "../../drivers/video/terminal_driver.hpp"
 #include "../../drivers/storage/nvme_controller.hpp"
@@ -242,6 +244,32 @@ Status RebootCommand::execute(const CommandArgs&) {
     asm volatile("lidt (%0); int3" :: "r"(&nullIdt) : "memory");
 
     arch::haltForever();
+}
+
+Status HistoryCommand::execute(const CommandArgs&) {
+    auto& le    = LineEditor::instance();
+    usize count = le.getHistoryCount();
+    if (count == 0) {
+        kprintf("  \033[90m(history is empty)\033[0m\n");
+        return Status::Ok;
+    }
+    for (usize i = 0; i < count; ++i) {
+        const char* entry = le.getHistoryAt(i);
+        if (entry) {
+            kprintf("  \033[90m%3zu\033[0m  %s\n", i + 1, entry);
+        }
+    }
+    return Status::Ok;
+}
+
+Status EditCommand::execute(const CommandArgs& args) {
+    if (args.argc < 2) {
+        kprintf("Usage: %s\n", getUsage());
+        return Status::InvalidArgument;
+    }
+    const proc::Task* t   = proc::Scheduler::instance().getCurrentTask();
+    const char*       cwd = t ? t->getCwd() : "/";
+    return TextEditor::openAndEdit(cwd, args.argv[1]);
 }
 
 } // namespace cortez::shell::commands

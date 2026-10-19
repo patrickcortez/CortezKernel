@@ -4,8 +4,10 @@
  */
 
 #include "shell.hpp"
+#include "line_editor.hpp"
 #include "commands/fs_commands.hpp"
 #include "commands/sys_commands.hpp"
+#include "commands/module_commands.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
 #include "../drivers/video/terminal_driver.hpp"
 #include "../proc/scheduler.hpp"
@@ -40,6 +42,13 @@ commands::FreeCommand     s_cmdFree;
 commands::UnameCommand    s_cmdUname;
 commands::ClearCommand    s_cmdClear;
 commands::RebootCommand   s_cmdReboot;
+commands::HistoryCommand  s_cmdHistory;
+commands::EditCommand     s_cmdEdit;
+commands::InsmodCommand   s_cmdInsmod;
+commands::RmmodCommand    s_cmdRmmod;
+commands::LsmodCommand    s_cmdLsmod;
+commands::RunCommand      s_cmdRun;
+commands::CcCommand       s_cmdCc;
 } // namespace
 
 Shell& Shell::instance() noexcept {
@@ -47,38 +56,79 @@ Shell& Shell::instance() noexcept {
     return s_shell;
 }
 
-void Shell::registerCommand(IShellCommand* cmd) noexcept {
-    if (cmd && m_cmdCount < MAX_COMMANDS) {
-        m_commands[m_cmdCount++] = cmd;
+Status Shell::registerCommand(IShellCommand* cmd) noexcept {
+    if (!cmd || !cmd->getName() || !cmd->getName()[0]) return Status::InvalidArgument;
+    for (usize i = 0; i < m_cmdCount; ++i) {
+        if (m_commands[i] && str::compare(m_commands[i]->getName(), cmd->getName()) == 0) {
+            return Status::AlreadyExists;
+        }
     }
+    if (m_cmdCount >= MAX_COMMANDS) return Status::NoSpace;
+    m_commands[m_cmdCount++] = cmd;
+    return Status::Ok;
+}
+
+Status Shell::unregisterCommand(IShellCommand* cmd) noexcept {
+    if (!cmd) return Status::InvalidArgument;
+    for (usize i = 0; i < m_cmdCount; ++i) {
+        if (m_commands[i] == cmd) {
+            for (usize j = i; j + 1 < m_cmdCount; ++j) {
+                m_commands[j] = m_commands[j + 1];
+            }
+            m_commands[--m_cmdCount] = nullptr;
+            return Status::Ok;
+        }
+    }
+    return Status::NotFound;
+}
+
+Status Shell::unregisterCommandByName(const char* name) noexcept {
+    if (!name || !name[0]) return Status::InvalidArgument;
+    for (usize i = 0; i < m_cmdCount; ++i) {
+        if (m_commands[i] && str::compare(m_commands[i]->getName(), name) == 0) {
+            for (usize j = i; j + 1 < m_cmdCount; ++j) {
+                m_commands[j] = m_commands[j + 1];
+            }
+            m_commands[--m_cmdCount] = nullptr;
+            return Status::Ok;
+        }
+    }
+    return Status::NotFound;
 }
 
 void Shell::init() noexcept {
     m_cmdCount = 0;
-    registerCommand(&s_cmdHelp);
-    registerCommand(&s_cmdLs);
-    registerCommand(&s_cmdCd);
-    registerCommand(&s_cmdPwd);
-    registerCommand(&s_cmdCat);
-    registerCommand(&s_cmdWrite);
-    registerCommand(&s_cmdAppend);
-    registerCommand(&s_cmdTouch);
-    registerCommand(&s_cmdMkdir);
-    registerCommand(&s_cmdRm);
-    registerCommand(&s_cmdStat);
-    registerCommand(&s_cmdDf);
-    registerCommand(&s_cmdSync);
-    registerCommand(&s_cmdMkfs);
-    registerCommand(&s_cmdDmesg);
-    registerCommand(&s_cmdLsblk);
-    registerCommand(&s_cmdLspci);
-    registerCommand(&s_cmdLsusb);
-    registerCommand(&s_cmdNvme);
-    registerCommand(&s_cmdPs);
-    registerCommand(&s_cmdFree);
-    registerCommand(&s_cmdUname);
-    registerCommand(&s_cmdClear);
-    registerCommand(&s_cmdReboot);
+    (void)registerCommand(&s_cmdHelp);
+    (void)registerCommand(&s_cmdLs);
+    (void)registerCommand(&s_cmdCd);
+    (void)registerCommand(&s_cmdPwd);
+    (void)registerCommand(&s_cmdCat);
+    (void)registerCommand(&s_cmdWrite);
+    (void)registerCommand(&s_cmdAppend);
+    (void)registerCommand(&s_cmdTouch);
+    (void)registerCommand(&s_cmdMkdir);
+    (void)registerCommand(&s_cmdRm);
+    (void)registerCommand(&s_cmdStat);
+    (void)registerCommand(&s_cmdDf);
+    (void)registerCommand(&s_cmdSync);
+    (void)registerCommand(&s_cmdMkfs);
+    (void)registerCommand(&s_cmdDmesg);
+    (void)registerCommand(&s_cmdLsblk);
+    (void)registerCommand(&s_cmdLspci);
+    (void)registerCommand(&s_cmdLsusb);
+    (void)registerCommand(&s_cmdNvme);
+    (void)registerCommand(&s_cmdPs);
+    (void)registerCommand(&s_cmdFree);
+    (void)registerCommand(&s_cmdUname);
+    (void)registerCommand(&s_cmdClear);
+    (void)registerCommand(&s_cmdReboot);
+    (void)registerCommand(&s_cmdHistory);
+    (void)registerCommand(&s_cmdEdit);
+    (void)registerCommand(&s_cmdInsmod);
+    (void)registerCommand(&s_cmdRmmod);
+    (void)registerCommand(&s_cmdLsmod);
+    (void)registerCommand(&s_cmdRun);
+    (void)registerCommand(&s_cmdCc);
 }
 
 void Shell::printPrompt() const noexcept {
@@ -88,45 +138,7 @@ void Shell::printPrompt() const noexcept {
 }
 
 void Shell::readLine(char* outBuf, usize maxLen) noexcept {
-    usize pos = 0;
-    outBuf[0] = '\0';
-
-    auto& kbd = drivers::input::Ps2KeyboardDriver::instance();
-
-    for (;;) {
-        if (!kbd.hasData()) {
-            kbd.pollHardware();
-            if (!kbd.hasData()) {
-                proc::Scheduler::instance().yield();
-            }
-        }
-
-        char ch = kbd.readCharBlocking();
-        if (ch == '\r' || ch == '\n') {
-            kprintf("\n");
-            outBuf[pos] = '\0';
-            return;
-        }
-        if (ch == '\x0C') { // Ctrl+L
-            drivers::video::TerminalDriver::instance().clear();
-            printPrompt();
-            klog::Logger::instance().writeRaw(outBuf, pos);
-            continue;
-        }
-        if (ch == '\b' || ch == 127) {
-            if (pos > 0) {
-                --pos;
-                outBuf[pos] = '\0';
-                kprintf("\b");
-            }
-            continue;
-        }
-        if (static_cast<u8>(ch) >= 0x20U && pos + 1 < maxLen) {
-            outBuf[pos++] = ch;
-            outBuf[pos]   = '\0';
-            kprintf("%c", ch);
-        }
-    }
+    LineEditor::instance().readLine(outBuf, maxLen);
 }
 
 void Shell::executeLine(char* line) noexcept {

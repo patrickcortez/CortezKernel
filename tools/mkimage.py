@@ -250,6 +250,31 @@ def build_exfat_partition(total_sectors: int, kernel_bytes: bytes, limine_conf_b
     # Allocate /var directory (Cluster 9)
     var_dir_cl, _ = alloc_clusters(b"")
 
+    def pack_host_dir(host_dir: str) -> int:
+        dir_cl, _ = alloc_clusters(b"")
+        entries = bytearray()
+        if os.path.isdir(host_dir):
+            for entry_name in sorted(os.listdir(host_dir)):
+                if entry_name.startswith("."):
+                    continue
+                full_p = os.path.join(host_dir, entry_name)
+                if os.path.isdir(full_p):
+                    sub_cl = pack_host_dir(full_p)
+                    entries.extend(make_exfat_entry_set(entry_name, True, sub_cl, cluster_size))
+                elif os.path.isfile(full_p):
+                    with open(full_p, "rb") as hf:
+                        fdata = hf.read()
+                    f_cl, f_len = alloc_clusters(fdata)
+                    entries.extend(make_exfat_entry_set(entry_name, False, f_cl, f_len))
+        if len(entries) > cluster_size:
+            raise RuntimeError(f"Directory {host_dir} exceeds single-cluster exFAT directory limit ({len(entries)} > {cluster_size})")
+        vol[cluster_byte_offset(dir_cl) : cluster_byte_offset(dir_cl) + len(entries)] = entries
+        return dir_cl
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ext_host_path = os.path.join(repo_root, "rootfs", "ext")
+    ext_dir_cl = pack_host_dir(ext_host_path)
+
     # Populate /boot: kernel.elf and limine.conf
     k_cl, k_len = alloc_clusters(kernel_bytes)
     lc_cl, lc_len = alloc_clusters(limine_conf_bytes)
@@ -283,7 +308,8 @@ def build_exfat_partition(total_sectors: int, kernel_bytes: bytes, limine_conf_b
     readme_data = (
         b"Welcome to the Cortez Kernel (x86_64 C++20 Monolithic OS)!\n"
         b"All files and directories on '/' reside on the physical NVMe SSD (/dev/nvme0n1p2).\n"
-        b"Try commands: ls, cat /etc/os-release, df, nvme, lsblk, lspci, ps, free, dmesg\n"
+        b"Runtime C extensions in /ext/drivers and /ext/commands are compiled and loaded at boot!\n"
+        b"Try commands: ls /ext, lsmod, date, hello, beep, run /ext/examples/fib.c 15, edit /ext/commands/hello.c\n"
     )
     rm_cl, rm_len = alloc_clusters(readme_data)
     root_user_entries = make_exfat_entry_set("README.txt", False, rm_cl, rm_len)
@@ -320,7 +346,8 @@ def build_exfat_partition(total_sectors: int, kernel_bytes: bytes, limine_conf_b
         make_exfat_entry_set("etc", True, etc_dir_cl, cluster_size) +
         make_exfat_entry_set("root", True, root_home_cl, cluster_size) +
         make_exfat_entry_set("home", True, home_dir_cl, cluster_size) +
-        make_exfat_entry_set("var", True, var_dir_cl, cluster_size)
+        make_exfat_entry_set("var", True, var_dir_cl, cluster_size) +
+        make_exfat_entry_set("ext", True, ext_dir_cl, cluster_size)
     )
     vol[cluster_byte_offset(4) : cluster_byte_offset(4) + len(root_dir_bytes)] = root_dir_bytes
 

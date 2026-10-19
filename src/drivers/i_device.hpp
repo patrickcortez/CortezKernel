@@ -69,12 +69,14 @@ public:
 class DeviceRegistry final {
 public:
     static constexpr usize MAX_BLOCK_DEVICES = 32;
-    static constexpr usize MAX_CHAR_DEVICES  = 16;
+    static constexpr usize MAX_CHAR_DEVICES  = 32;
 
     static DeviceRegistry& instance() noexcept;
 
     Status        registerBlockDevice(IBlockDevice* dev) noexcept;
+    Status        unregisterBlockDevice(IBlockDevice* dev) noexcept;
     Status        registerCharDevice(ICharDevice* dev) noexcept;
+    Status        unregisterCharDevice(ICharDevice* dev) noexcept;
 
     IBlockDevice* findBlockDevice(const char* name) const noexcept;
     ICharDevice*  findCharDevice(const char* name) const noexcept;

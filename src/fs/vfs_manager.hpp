@@ -27,6 +27,7 @@ public:
     Status            close(i32 fd) noexcept;
     Result<usize>     read(i32 fd, void* buffer, usize count) noexcept;
     Result<usize>     write(i32 fd, const void* buffer, usize count) noexcept;
+    Result<u64>       seek(i32 fd, i64 offset, i32 whence) noexcept;
 
     Status            createFile(const char* cwd, const char* path) noexcept;
     Status            mkdir(const char* cwd, const char* path) noexcept;

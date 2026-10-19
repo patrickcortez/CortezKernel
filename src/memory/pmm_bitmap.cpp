@@ -112,9 +112,16 @@ Result<phys_addr_t> BitmapPmm::allocPages(usize count) noexcept {
     }
 
     auto searchRange = [&](usize startIdx, usize endIdx) -> usize {
-        usize consecutive = 0;
-        usize candidateStart = 0;
+        const u64* bitmapWords = reinterpret_cast<const u64*>(m_bitmap);
+        usize consecutive      = 0;
+        usize candidateStart   = 0;
         for (usize idx = startIdx; idx < endIdx; ++idx) {
+            if (consecutive == 0 && (idx & 63U) == 0 && (idx + 64) <= endIdx) {
+                if (bitmapWords[idx >> 6] == ~0ULL) {
+                    idx += 63;
+                    continue;
+                }
+            }
             if (!testBit(idx)) {
                 if (consecutive == 0) candidateStart = idx;
                 if (++consecutive == count) {

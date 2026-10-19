@@ -65,12 +65,17 @@ public:
     static constexpr u8    VEC_KEYBOARD   = 0x21;
     static constexpr u8    VEC_NVME_MSI   = 0x40;
     static constexpr u8    VEC_XHCI_MSI   = 0x41;
+    static constexpr u8    VEC_DYN_START  = 0x50;
+    static constexpr u8    VEC_DYN_END    = 0xEF;
     static constexpr u8    VEC_SPURIOUS   = 0xFF;
 
     static IdtManager& instance() noexcept;
 
     void init() noexcept;
     void registerHandler(u8 vector, IInterruptHandler* handler) noexcept;
+    void unregisterHandler(u8 vector) noexcept;
+    i32  allocateVector() noexcept;
+    void freeVector(u8 vector) noexcept;
     void dispatch(InterruptFrame* frame) noexcept;
 
 private:
@@ -80,6 +85,7 @@ private:
 
     CORTEZ_ALIGNED(16) IdtEntry m_idt[IDT_ENTRIES]{};
     IInterruptHandler*          m_handlers[IDT_ENTRIES]{};
+    bool                        m_vectorUsed[IDT_ENTRIES]{};
 };
 
 } // namespace cortez::arch

@@ -95,6 +95,13 @@ Status Ps2KeyboardDriver::init() noexcept {
     return Status::Ok;
 }
 
+void Ps2KeyboardDriver::pushSequence(const char* seq) noexcept {
+    if (!seq) return;
+    while (*seq) {
+        m_buffer.push(*seq++);
+    }
+}
+
 void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
     if (scancode == 0xE0U) {
         m_extendedE0 = true;
@@ -102,10 +109,35 @@ void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
     }
 
     if (m_extendedE0) {
-        m_extendedE0 = false;
-        // Extended keys (Delete = 0x53 -> '\b')
-        if (scancode == 0x53U) {
-            m_buffer.push('\b');
+        m_extendedE0     = false;
+        bool extReleased = (scancode & 0x80U) != 0;
+        u8   extKey      = scancode & 0x7FU;
+
+        if (extKey == 0x1DU) { // Right Ctrl
+            m_rightCtrlHeld = !extReleased;
+            m_ctrlHeld      = m_leftCtrlHeld || m_rightCtrlHeld;
+            return;
+        }
+        // Ignore fake shift bytes emitted by laptop ECs around extended navigation keys
+        if (extKey == 0x2AU || extKey == 0x36U) {
+            return;
+        }
+        if (extReleased) {
+            return;
+        }
+
+        switch (extKey) {
+            case 0x48U: pushSequence("\033[A");  break; // Up Arrow
+            case 0x50U: pushSequence("\033[B");  break; // Down Arrow
+            case 0x4DU: pushSequence("\033[C");  break; // Right Arrow
+            case 0x4BU: pushSequence("\033[D");  break; // Left Arrow
+            case 0x47U: pushSequence("\033[H");  break; // Home
+            case 0x4FU: pushSequence("\033[F");  break; // End
+            case 0x52U: pushSequence("\033[2~"); break; // Insert
+            case 0x53U: pushSequence("\033[3~"); break; // Delete
+            case 0x49U: pushSequence("\033[5~"); break; // Page Up
+            case 0x51U: pushSequence("\033[6~"); break; // Page Down
+            default: break;
         }
         return;
     }
@@ -122,7 +154,8 @@ void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
         return;
     }
     if (key == 0x1DU) { // Left Ctrl
-        m_ctrlHeld = !released;
+        m_leftCtrlHeld = !released;
+        m_ctrlHeld     = m_leftCtrlHeld || m_rightCtrlHeld;
         return;
     }
     if (key == 0x3AU && !released) { // Caps Lock toggle
@@ -145,9 +178,12 @@ void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
         }
     }
 
-    if (m_ctrlHeld && (ch == 'l' || ch == 'L')) {
-        m_buffer.push('\x0C'); // Ctrl+L form-feed (clear screen)
-        return;
+    if (m_ctrlHeld) {
+        char lower = str::toLower(ch);
+        if (lower >= 'a' && lower <= 'z') {
+            m_buffer.push(static_cast<char>(lower - 'a' + 1));
+            return;
+        }
     }
 
     m_buffer.push(ch);
