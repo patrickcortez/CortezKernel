@@ -7,6 +7,7 @@
 #include "shell.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
 #include "../drivers/video/terminal_driver.hpp"
+#include "../fs/vfs_manager.hpp"
 #include "../proc/scheduler.hpp"
 #include "../lib/string_utils.hpp"
 #include "../lib/printk.hpp"
@@ -266,23 +267,74 @@ void LineEditor::readLine(char* outBuf, usize maxLen) noexcept {
             continue;
         }
 
-        if (ch == '\t') { // Tab completion for commands when on first token
-            if (cursor == len && len > 0 && !str::findChar(outBuf, ' ')) {
-                const char* match = nullptr;
-                usize matchCount  = 0;
-                usize cmdCount    = Shell::instance().getCommandCount();
-                for (usize i = 0; i < cmdCount; ++i) {
-                    const IShellCommand* cmd = Shell::instance().getCommandAt(i);
-                    if (cmd && str::compareN(cmd->getName(), outBuf, len) == 0) {
-                        match = cmd->getName();
-                        ++matchCount;
+        if (ch == '\t') { // Tab completion for commands and VFS file/directory paths
+            if (cursor == len && len > 0) {
+                const char* lastSpace = str::findLastChar(outBuf, ' ');
+                if (!lastSpace) {
+                    const char* match = nullptr;
+                    usize matchCount  = 0;
+                    usize cmdCount    = Shell::instance().getCommandCount();
+                    for (usize i = 0; i < cmdCount; ++i) {
+                        const IShellCommand* cmd = Shell::instance().getCommandAt(i);
+                        if (cmd && str::compareN(cmd->getName(), outBuf, len) == 0) {
+                            match = cmd->getName();
+                            ++matchCount;
+                        }
                     }
-                }
-                if (matchCount == 1 && match) {
-                    char completed[128]{};
-                    str::copy(completed, match, sizeof(completed));
-                    str::concat(completed, " ", sizeof(completed));
-                    replaceLine(outBuf, maxLen, len, cursor, completed);
+                    if (matchCount == 1 && match) {
+                        char completed[128]{};
+                        str::copy(completed, match, sizeof(completed));
+                        str::concat(completed, " ", sizeof(completed));
+                        replaceLine(outBuf, maxLen, len, cursor, completed);
+                    }
+                } else {
+                    const char* token     = lastSpace + 1;
+                    const char* lastSlash = str::findLastChar(token, '/');
+                    const proc::Task* t   = proc::Scheduler::instance().getCurrentTask();
+                    const char* cwd       = t ? t->getCwd() : "/";
+
+                    char dirPart[128]{};
+                    const char* namePrefix = token;
+                    if (lastSlash) {
+                        usize dirLen = static_cast<usize>(lastSlash - token);
+                        if (dirLen == 0) {
+                            str::copy(dirPart, "/", sizeof(dirPart));
+                        } else {
+                            if (dirLen >= sizeof(dirPart)) dirLen = sizeof(dirPart) - 1;
+                            memcpy(dirPart, token, dirLen);
+                            dirPart[dirLen] = '\0';
+                        }
+                        namePrefix = lastSlash + 1;
+                    } else {
+                        str::copy(dirPart, cwd, sizeof(dirPart));
+                    }
+
+                    usize prefixLen  = str::length(namePrefix);
+                    usize matchCount = 0;
+                    fs::DirEntry matchedEntry{};
+                    fs::DirEntry entry{};
+                    for (usize idx = 0;
+                         fs::VfsManager::instance().readDir(cwd, dirPart, idx, &entry) == Status::Ok;
+                         ++idx) {
+                        if (str::compareN(entry.name, namePrefix, prefixLen) == 0) {
+                            matchedEntry = entry;
+                            ++matchCount;
+                        }
+                    }
+
+                    if (matchCount == 1) {
+                        char completed[MAX_LINE_LEN]{};
+                        usize headLen = static_cast<usize>((lastSlash ? (lastSlash + 1) : token) - outBuf);
+                        if (headLen < sizeof(completed)) {
+                            memcpy(completed, outBuf, headLen);
+                            completed[headLen] = '\0';
+                            str::concat(completed, matchedEntry.name, sizeof(completed));
+                            str::concat(completed,
+                                        (matchedEntry.type == fs::NodeType::Directory) ? "/" : " ",
+                                        sizeof(completed));
+                            replaceLine(outBuf, maxLen, len, cursor, completed);
+                        }
+                    }
                 }
             }
             continue;

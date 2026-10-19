@@ -29,19 +29,24 @@ void formatArgs(void (*emit)(char, void*), void* ctx, const char* fmt, va_list a
             continue;
         }
 
-        // Parse zero-padding and width
-        u32 minDigits = 0;
-        if (*fmt == '0') {
+        // Parse alignment and padding flags
+        bool leftAlign = false;
+        if (*fmt == '-') {
+            leftAlign = true;
             ++fmt;
-            while (*fmt >= '0' && *fmt <= '9') {
-                minDigits = minDigits * 10 + static_cast<u32>(*fmt - '0');
-                ++fmt;
-            }
-        } else {
-            while (*fmt >= '0' && *fmt <= '9') {
-                minDigits = minDigits * 10 + static_cast<u32>(*fmt - '0');
-                ++fmt;
-            }
+        }
+
+        char padChar = ' ';
+        if (*fmt == '0' && !leftAlign) {
+            padChar = '0';
+            ++fmt;
+        }
+
+        // Parse field width
+        u32 width = 0;
+        while (*fmt >= '0' && *fmt <= '9') {
+            width = width * 10 + static_cast<u32>(*fmt - '0');
+            ++fmt;
         }
 
         // Parse length modifier ('l' or 'll' or 'z')
@@ -58,54 +63,67 @@ void formatArgs(void (*emit)(char, void*), void* ctx, const char* fmt, va_list a
         }
 
         char numBuf[72];
+        const char* piece = numBuf;
         switch (*fmt) {
             case 's': {
-                const char* s = va_arg(args, const char*);
-                if (!s) s = "(null)";
-                while (*s) emit(*s++, ctx);
+                piece = va_arg(args, const char*);
+                if (!piece) piece = "(null)";
                 break;
             }
             case 'c': {
-                char c = static_cast<char>(va_arg(args, int));
-                emit(c, ctx);
+                numBuf[0] = static_cast<char>(va_arg(args, int));
+                numBuf[1] = '\0';
                 break;
             }
             case 'd':
             case 'i': {
                 i64 val = isLongLong ? va_arg(args, i64) : va_arg(args, int);
                 str::intToStr(val, numBuf, 10);
-                for (usize i = 0; numBuf[i]; ++i) emit(numBuf[i], ctx);
                 break;
             }
             case 'u': {
                 u64 val = isLongLong ? va_arg(args, u64) : va_arg(args, unsigned int);
-                str::uintToStr(val, numBuf, 10, minDigits);
-                for (usize i = 0; numBuf[i]; ++i) emit(numBuf[i], ctx);
+                str::uintToStr(val, numBuf, 10, (padChar == '0') ? width : 0);
                 break;
             }
             case 'x':
             case 'X': {
                 u64 val = isLongLong ? va_arg(args, u64) : va_arg(args, unsigned int);
-                str::uintToStr(val, numBuf, 16, minDigits);
-                for (usize i = 0; numBuf[i]; ++i) {
-                    char ch = (*fmt == 'x') ? str::toLower(numBuf[i]) : numBuf[i];
-                    emit(ch, ctx);
+                str::uintToStr(val, numBuf, 16, (padChar == '0') ? width : 0);
+                if (*fmt == 'x') {
+                    for (usize i = 0; numBuf[i]; ++i) {
+                        numBuf[i] = str::toLower(numBuf[i]);
+                    }
                 }
                 break;
             }
             case 'p': {
                 u64 val = reinterpret_cast<u64>(va_arg(args, void*));
-                emit('0', ctx);
-                emit('x', ctx);
-                str::uintToStr(val, numBuf, 16, 16);
-                for (usize i = 0; numBuf[i]; ++i) emit(str::toLower(numBuf[i]), ctx);
+                numBuf[0] = '0';
+                numBuf[1] = 'x';
+                str::uintToStr(val, numBuf + 2, 16, 16);
+                for (usize i = 2; numBuf[i]; ++i) {
+                    numBuf[i] = str::toLower(numBuf[i]);
+                }
                 break;
             }
-            default:
-                emit('%', ctx);
-                if (*fmt) emit(*fmt, ctx);
+            default: {
+                numBuf[0] = '%';
+                numBuf[1] = *fmt ? *fmt : '\0';
+                numBuf[2] = '\0';
                 break;
+            }
         }
+
+        usize plen = str::length(piece);
+        if (!leftAlign && width > plen && padChar == ' ') {
+            for (usize p = 0; p < width - plen; ++p) emit(' ', ctx);
+        }
+        for (usize i = 0; i < plen; ++i) emit(piece[i], ctx);
+        if (leftAlign && width > plen) {
+            for (usize p = 0; p < width - plen; ++p) emit(' ', ctx);
+        }
+
         if (*fmt) ++fmt;
     }
 }

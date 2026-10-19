@@ -118,6 +118,11 @@ void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
             m_ctrlHeld      = m_leftCtrlHeld || m_rightCtrlHeld;
             return;
         }
+        if (extKey == 0x38U) { // Right Alt (AltGr)
+            m_rightAltHeld = !extReleased;
+            m_altHeld      = m_leftAltHeld || m_rightAltHeld;
+            return;
+        }
         // Ignore fake shift bytes emitted by laptop ECs around extended navigation keys
         if (extKey == 0x2AU || extKey == 0x36U) {
             return;
@@ -158,6 +163,11 @@ void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
         m_ctrlHeld     = m_leftCtrlHeld || m_rightCtrlHeld;
         return;
     }
+    if (key == 0x38U) { // Left Alt
+        m_leftAltHeld = !released;
+        m_altHeld     = m_leftAltHeld || m_rightAltHeld;
+        return;
+    }
     if (key == 0x3AU && !released) { // Caps Lock toggle
         m_capsLock = !m_capsLock;
         return;
@@ -184,6 +194,24 @@ void Ps2KeyboardDriver::processScancode(u8 scancode) noexcept {
             m_buffer.push(static_cast<char>(lower - 'a' + 1));
             return;
         }
+        if (ch == '\\' || ch == '|') {
+            m_buffer.push('\x1C'); // Ctrl+\ (File Separator)
+            return;
+        }
+        if (ch == '6' || ch == '^' || ch == ' ') {
+            m_buffer.push('\x1E'); // Ctrl+6 / Ctrl+^ / Ctrl+Space (Record Separator / Mark)
+            return;
+        }
+        if (ch == '-' || ch == '_' || ch == '/' || ch == '?') {
+            m_buffer.push('\x1F'); // Ctrl+_ / Ctrl+- / Ctrl+/ (Unit Separator)
+            return;
+        }
+    }
+
+    if (m_altHeld) {
+        m_buffer.push('\033');
+        m_buffer.push(ch);
+        return;
     }
 
     m_buffer.push(ch);

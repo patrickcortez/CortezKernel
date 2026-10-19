@@ -19,6 +19,7 @@
 #include "../../memory/heap_allocator.hpp"
 #include "../../proc/scheduler.hpp"
 #include "../../fs/vfs_manager.hpp"
+#include "../../klibc/klibc.hpp"
 #include "../../lib/printk.hpp"
 
 namespace cortez::shell::commands {
@@ -262,14 +263,41 @@ Status HistoryCommand::execute(const CommandArgs&) {
     return Status::Ok;
 }
 
-Status EditCommand::execute(const CommandArgs& args) {
-    if (args.argc < 2) {
-        kprintf("Usage: %s\n", getUsage());
-        return Status::InvalidArgument;
-    }
+namespace {
+Status launchNanoEditor(const CommandArgs& args) noexcept {
     const proc::Task* t   = proc::Scheduler::instance().getCurrentTask();
     const char*       cwd = t ? t->getCwd() : "/";
-    return TextEditor::openAndEdit(cwd, args.argv[1]);
+
+    const char* filePath = nullptr;
+    usize initLine       = 0;
+    usize initCol        = 0;
+
+    for (usize i = 1; i < args.argc; ++i) {
+        const char* arg = args.argv[i];
+        if (!arg || !arg[0]) continue;
+        if (arg[0] == '+' && arg[1] >= '0' && arg[1] <= '9') {
+            char* endPtr = nullptr;
+            long ln = klibc_strtol(arg + 1, &endPtr, 10);
+            if (ln > 0) initLine = static_cast<usize>(ln);
+            if (endPtr && (*endPtr == ',' || *endPtr == ':')) {
+                long col = klibc_strtol(endPtr + 1, nullptr, 10);
+                if (col > 0) initCol = static_cast<usize>(col);
+            }
+        } else {
+            filePath = arg;
+        }
+    }
+
+    return TextEditor::openAndEdit(cwd, filePath, initLine, initCol);
+}
+} // namespace
+
+Status NanoCommand::execute(const CommandArgs& args) {
+    return launchNanoEditor(args);
+}
+
+Status EditCommand::execute(const CommandArgs& args) {
+    return launchNanoEditor(args);
 }
 
 } // namespace cortez::shell::commands

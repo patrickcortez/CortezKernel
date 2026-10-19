@@ -42,6 +42,9 @@ private:
     bool m_leftCtrlHeld  = false;
     bool m_rightCtrlHeld = false;
     bool m_ctrlHeld      = false;
+    bool m_leftAltHeld   = false;
+    bool m_rightAltHeld  = false;
+    bool m_altHeld       = false;
     bool m_capsLock      = false;
     bool m_extendedE0    = false;
 };

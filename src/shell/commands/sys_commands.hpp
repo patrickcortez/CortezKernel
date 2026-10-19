@@ -105,11 +105,19 @@ public:
     Status      execute(const CommandArgs& args) override;
 };
 
+class NanoCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "nano"; }
+    const char* getUsage() const noexcept override { return "nano [+line[,col]] [file]"; }
+    const char* getDescription() const noexcept override { return "GNU nano-style full-screen text editor (^G Help, ^O Write, ^X Exit)"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
 class EditCommand final : public IShellCommand {
 public:
     const char* getName() const noexcept override { return "edit"; }
-    const char* getUsage() const noexcept override { return "edit <file>"; }
-    const char* getDescription() const noexcept override { return "Full-screen interactive text editor (^S Save, ^X Exit)"; }
+    const char* getUsage() const noexcept override { return "edit [+line[,col]] [file]"; }
+    const char* getDescription() const noexcept override { return "Alias for nano full-screen interactive text editor"; }
     Status      execute(const CommandArgs& args) override;
 };
 

@@ -43,6 +43,7 @@ commands::UnameCommand    s_cmdUname;
 commands::ClearCommand    s_cmdClear;
 commands::RebootCommand   s_cmdReboot;
 commands::HistoryCommand  s_cmdHistory;
+commands::NanoCommand     s_cmdNano;
 commands::EditCommand     s_cmdEdit;
 commands::InsmodCommand   s_cmdInsmod;
 commands::RmmodCommand    s_cmdRmmod;
@@ -123,6 +124,7 @@ void Shell::init() noexcept {
     (void)registerCommand(&s_cmdClear);
     (void)registerCommand(&s_cmdReboot);
     (void)registerCommand(&s_cmdHistory);
+    (void)registerCommand(&s_cmdNano);
     (void)registerCommand(&s_cmdEdit);
     (void)registerCommand(&s_cmdInsmod);
     (void)registerCommand(&s_cmdRmmod);

@@ -27,27 +27,37 @@ Status LsCommand::execute(const CommandArgs& args) {
     if (status != Status::Ok) return status;
 
     if (st.type == fs::NodeType::File) {
-        kprintf("  \033[37m%-28s\033[0m %10llu B  [Cluster %u]\n",
+        kprintf("  \033[90m%-6s %-28s %12s  %s\033[0m\n", "TYPE", "NAME", "SIZE", "CLUSTER");
+        kprintf("  \033[32m<FILE> \033[97m%-28s\033[0m %10llu B  #%u\n",
                 st.name, st.size, st.firstCluster);
         return Status::Ok;
     }
 
-    usize idx = 0;
+    usize idx       = 0;
+    usize dirCount  = 0;
+    usize fileCount = 0;
     fs::DirEntry entry{};
     kprintf("  \033[90m%-6s %-28s %12s  %s\033[0m\n", "TYPE", "NAME", "SIZE", "CLUSTER");
     while (fs::VfsManager::instance().readDir(getActiveCwd(), target, idx, &entry) == Status::Ok) {
         if (entry.type == fs::NodeType::Directory) {
-            kprintf("  \033[34m<DIR>  %-28s\033[0m %10llu B  #%u\n",
-                    entry.name, entry.size, entry.firstCluster);
+            char dirName[72]{};
+            str::copy(dirName, entry.name, sizeof(dirName) - 2);
+            str::concat(dirName, "/", sizeof(dirName));
+            kprintf("  \033[34m<DIR>  \033[94m%-28s\033[0m %10llu B  #%u\n",
+                    dirName, entry.size, entry.firstCluster);
+            ++dirCount;
         } else {
-            kprintf("  \033[32m<FILE>\033[0m %-28s %10llu B  #%u\n",
+            kprintf("  \033[32m<FILE> \033[97m%-28s\033[0m %10llu B  #%u\n",
                     entry.name, entry.size, entry.firstCluster);
+            ++fileCount;
         }
         ++idx;
     }
 
     if (idx == 0) {
         kprintf("  \033[90m(empty directory)\033[0m\n");
+    } else {
+        kprintf("  \033[90mTotal: %zu file(s), %zu dir(s)\033[0m\n", fileCount, dirCount);
     }
     return Status::Ok;
 }
