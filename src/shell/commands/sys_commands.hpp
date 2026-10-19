@@ -57,6 +57,22 @@ public:
     Status      execute(const CommandArgs& args) override;
 };
 
+class AhciInfoCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "ahci"; }
+    const char* getUsage() const noexcept override { return "ahci"; }
+    const char* getDescription() const noexcept override { return "Display SATA AHCI controller, port link status, and disks"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
+class StorageInfoCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "storage"; }
+    const char* getUsage() const noexcept override { return "storage"; }
+    const char* getDescription() const noexcept override { return "Display dynamically detected storage media (NVMe, SATA, USB)"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
 class LsusbCommand final : public IShellCommand {
 public:
     const char* getName() const noexcept override { return "lsusb"; }

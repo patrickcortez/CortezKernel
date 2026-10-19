@@ -23,9 +23,10 @@ public:
 
     void init(NvmeController* ctrl, u32 nsid, u32 blockSize, u64 blockCount) noexcept;
 
-    const char* getName() const noexcept override { return "nvme0n1"; }
-    u32         getBlockSize() const noexcept override { return m_blockSize; }
-    u64         getBlockCount() const noexcept override { return m_blockCount; }
+    const char*    getName() const noexcept override { return "nvme0n1"; }
+    StorageBusType getBusType() const noexcept override { return StorageBusType::NVMe; }
+    u32            getBlockSize() const noexcept override { return m_blockSize; }
+    u64            getBlockCount() const noexcept override { return m_blockCount; }
 
     Status readBlocks(u64 lba, u32 count, void* buffer) override;
     Status writeBlocks(u64 lba, u32 count, const void* buffer) override;

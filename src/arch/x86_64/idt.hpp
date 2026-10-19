@@ -65,6 +65,7 @@ public:
     static constexpr u8    VEC_KEYBOARD   = 0x21;
     static constexpr u8    VEC_NVME_MSI   = 0x40;
     static constexpr u8    VEC_XHCI_MSI   = 0x41;
+    static constexpr u8    VEC_AHCI_MSI   = 0x42;
     static constexpr u8    VEC_DYN_START  = 0x50;
     static constexpr u8    VEC_DYN_END    = 0xEF;
     static constexpr u8    VEC_SPURIOUS   = 0xFF;

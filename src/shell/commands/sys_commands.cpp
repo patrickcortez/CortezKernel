@@ -10,6 +10,8 @@
 #include "../../drivers/i_device.hpp"
 #include "../../drivers/video/terminal_driver.hpp"
 #include "../../drivers/storage/nvme_controller.hpp"
+#include "../../drivers/storage/ahci_controller.hpp"
+#include "../../drivers/storage/storage_manager.hpp"
 #include "../../drivers/usb/xhci_controller.hpp"
 #include "../../arch/x86_64/pcie.hpp"
 #include "../../arch/x86_64/apic.hpp"
@@ -52,16 +54,17 @@ Status LsblkCommand::execute(const CommandArgs&) {
     auto& reg = drivers::DeviceRegistry::instance();
     usize count = reg.getBlockDeviceCount();
 
-    kprintf("  \033[90m%-14s %10s %14s %12s  %s\033[0m\n",
-            "NAME", "SECT-SIZE", "SECTORS", "SIZE (MiB)", "LABEL");
+    kprintf("  \033[90m%-12s %-6s %10s %14s %12s  %s\033[0m\n",
+            "NAME", "TYPE", "SECT-SIZE", "SECTORS", "SIZE (MiB)", "LABEL");
 
     for (usize i = 0; i < count; ++i) {
         drivers::IBlockDevice* bdev = reg.getBlockDeviceAt(i);
         if (!bdev) continue;
         u64 bytes = bdev->getBlockCount() * bdev->getBlockSize();
         const char* lbl = bdev->getLabel();
-        kprintf("  /dev/%-9s %8u B %14llu %9llu MiB  %s\n",
+        kprintf("  /dev/%-7s %-6s %8u B %14llu %9llu MiB  %s\n",
                 bdev->getName(),
+                bdev->getBusTypeName(),
                 bdev->getBlockSize(),
                 bdev->getBlockCount(),
                 bytes / (1024ULL * 1024ULL),
@@ -109,6 +112,79 @@ Status NvmeInfoCommand::execute(const CommandArgs&) {
         kprintf("    LBA Block Size   : %u bytes\n", ns->getBlockSize());
         kprintf("    Total Capacity   : %llu blocks (%llu MiB)\n", ns->getBlockCount(), totalMiB);
     }
+    return Status::Ok;
+}
+
+Status AhciInfoCommand::execute(const CommandArgs&) {
+    auto& ahci = drivers::storage::AhciController::instance();
+    if (!ahci.isReady()) {
+        kprintf("\033[33mNo active SATA AHCI Host Controller detected.\033[0m\n");
+        return Status::DeviceNotFound;
+    }
+
+    u32 ver = ahci.getVersion();
+    usize diskCount = ahci.getDiskCount();
+
+    kprintf("  \033[36mSATA AHCI Controller Status:\033[0m\n");
+    kprintf("    AHCI Spec Version : %u.%u\n", (ver >> 16) & 0xFFFFU, (ver >> 8) & 0xFFU);
+    kprintf("    Attached Disks    : %zu\n", diskCount);
+
+    if (diskCount == 0) {
+        kprintf("    \033[90m(no SATA disks attached or detected)\033[0m\n");
+        return Status::Ok;
+    }
+
+    for (usize i = 0; i < diskCount; ++i) {
+        auto* disk = ahci.getDisk(i);
+        if (!disk) continue;
+        auto* port = disk->getPort();
+        u64 sizeMiB = (disk->getBlockCount() * disk->getBlockSize()) / (1024ULL * 1024ULL);
+        kprintf("\n    \033[32m/dev/%-4s\033[0m Port %u [%s]\n",
+                disk->getName(),
+                port ? port->getPortIndex() : 0,
+                port ? port->getSpeedString() : "Unknown");
+        kprintf("      Model Number   : %s\n", disk->getModel());
+        kprintf("      Serial Number  : %s\n", disk->getSerial());
+        kprintf("      Firmware Rev   : %s\n", disk->getFirmware());
+        kprintf("      Sector Size    : %u bytes\n", disk->getBlockSize());
+        kprintf("      Total Capacity : %llu sectors (%llu MiB)\n", disk->getBlockCount(), sizeMiB);
+    }
+    return Status::Ok;
+}
+
+Status StorageInfoCommand::execute(const CommandArgs&) {
+    auto& mgr = drivers::storage::StorageManager::instance();
+    auto& reg = drivers::DeviceRegistry::instance();
+
+    kprintf("  \033[36mStorage Subsystem Inventory:\033[0m\n");
+    kprintf("    PCIe Storage Controllers : %zu NVMe, %zu SATA AHCI, %zu xHCI USB\n",
+            mgr.getNvmeControllerCount(),
+            mgr.getSataControllerCount(),
+            mgr.getUsbControllerCount());
+    kprintf("    Active Drivers           : %s%s%s\n",
+            mgr.hasNvme() ? "[NVMe] " : "",
+            mgr.hasSata() ? "[SATA AHCI] " : "",
+            mgr.hasUsb()  ? "[USB MSC] "  : "(none)");
+
+    usize count = reg.getBlockDeviceCount();
+    if (count == 0) {
+        kprintf("    \033[90m(no block storage devices registered)\033[0m\n");
+        return Status::Ok;
+    }
+
+    kprintf("\n  \033[36mRegistered Block Devices (%zu):\033[0m\n", count);
+    for (usize i = 0; i < count; ++i) {
+        auto* bdev = reg.getBlockDeviceAt(i);
+        if (!bdev) continue;
+        u64 sizeMiB = (bdev->getBlockCount() * bdev->getBlockSize()) / (1024ULL * 1024ULL);
+        const char* lbl = bdev->getLabel();
+        kprintf("    /dev/%-8s \033[33m[%-4s]\033[0m %8llu MiB  %s\n",
+                bdev->getName(),
+                bdev->getBusTypeName(),
+                sizeMiB,
+                (lbl && lbl[0]) ? lbl : "");
+    }
+
     return Status::Ok;
 }
 

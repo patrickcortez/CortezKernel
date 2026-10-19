@@ -39,6 +39,8 @@ commands::LsblkCommand    s_cmdLsblk;
 commands::LspciCommand    s_cmdLspci;
 commands::LsusbCommand    s_cmdLsusb;
 commands::NvmeInfoCommand s_cmdNvme;
+commands::AhciInfoCommand s_cmdAhci;
+commands::StorageInfoCommand s_cmdStorage;
 commands::PsCommand       s_cmdPs;
 commands::FreeCommand     s_cmdFree;
 commands::UnameCommand    s_cmdUname;
@@ -120,6 +122,8 @@ void Shell::init() noexcept {
     (void)registerCommand(&s_cmdLspci);
     (void)registerCommand(&s_cmdLsusb);
     (void)registerCommand(&s_cmdNvme);
+    (void)registerCommand(&s_cmdAhci);
+    (void)registerCommand(&s_cmdStorage);
     (void)registerCommand(&s_cmdPs);
     (void)registerCommand(&s_cmdFree);
     (void)registerCommand(&s_cmdUname);

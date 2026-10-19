@@ -94,6 +94,10 @@ CPP_SRCS := \
     src/drivers/input/ps2_keyboard.cpp \
     src/drivers/storage/nvme_queue.cpp \
     src/drivers/storage/nvme_controller.cpp \
+    src/drivers/storage/ahci_port.cpp \
+    src/drivers/storage/sata_disk.cpp \
+    src/drivers/storage/ahci_controller.cpp \
+    src/drivers/storage/storage_manager.cpp \
     src/drivers/storage/gpt_partition.cpp \
     src/drivers/usb/xhci_rings.cpp \
     src/drivers/usb/xhci_controller.cpp \
@@ -122,7 +126,7 @@ CPP_OBJS := $(patsubst src/%.cpp,$(BUILD_DIR)/%.cpp.o,$(CPP_SRCS))
 TCC_OBJS := $(patsubst third_party/%.cpp,$(BUILD_DIR)/third_party/%.cpp.o,$(TCC_SRCS))
 ALL_OBJS := $(ASM_OBJS) $(CPP_OBJS) $(TCC_OBJS)
 
-.PHONY: all image run run-usb clean
+.PHONY: all image run run-sata run-dual run-usb clean
 
 all: image
 
@@ -149,6 +153,24 @@ run: image
 	    -drive file=$(DISK_IMAGE),if=none,id=nvm,format=raw \
 	    -device pcie-root-port,id=rp1,slot=0,chassis=1 \
 	    -device nvme,bus=rp1,drive=nvm,serial=CORTEZ2026 \
+	    -serial stdio
+
+run-sata: image
+	$(QEMU) -machine q35 -m 512M -bios $(OVMF) \
+	    -drive file=$(DISK_IMAGE),if=none,id=satadisk,format=raw \
+	    -device ich9-ahci,id=ahci \
+	    -device ide-hd,drive=satadisk,bus=ahci.0 \
+	    -serial stdio
+
+run-dual: image
+	@cp -f $(DISK_IMAGE) $(BUILD_DIR)/cortez-sata.img
+	$(QEMU) -machine q35 -m 512M -bios $(OVMF) \
+	    -drive file=$(DISK_IMAGE),if=none,id=nvm,format=raw \
+	    -device pcie-root-port,id=rp1,slot=0,chassis=1 \
+	    -device nvme,bus=rp1,drive=nvm,serial=CORTEZ2026 \
+	    -drive file=$(BUILD_DIR)/cortez-sata.img,if=none,id=satadisk,format=raw \
+	    -device ich9-ahci,id=ahci \
+	    -device ide-hd,drive=satadisk,bus=ahci.0 \
 	    -serial stdio
 
 run-usb: image

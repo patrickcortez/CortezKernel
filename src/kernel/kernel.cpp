@@ -19,6 +19,7 @@
 #include "../drivers/i_device.hpp"
 #include "../drivers/video/terminal_driver.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
+#include "../drivers/storage/storage_manager.hpp"
 #include "../drivers/storage/nvme_controller.hpp"
 #include "../drivers/storage/gpt_partition.hpp"
 #include "../drivers/usb/xhci_controller.hpp"
@@ -106,42 +107,16 @@ void Kernel::doBasicSetup() noexcept {
 
     arch::PcieManager::instance().init(&vmm);
 
-    auto& nvme = drivers::storage::NvmeController::instance();
-    if (nvme.init(&pmm, &vmm, boot.getHhdmOffset()) == Status::Ok) {
-        if (auto* ns = nvme.getNamespace()) {
-            drivers::storage::GptPartitionScanner::instance().scanDisk(ns);
-        }
-    }
-
-    drivers::usb::XhciManager::instance().init(&pmm, &vmm, boot.getHhdmOffset());
+    drivers::storage::StorageManager::instance().probeAll(&pmm, &vmm, boot.getHhdmOffset());
 }
 
 void Kernel::mountBlockRoot() noexcept {
-    // Only ever mount a partition that the Cortez image builder created (GPT name "Cortez-RootFS").
-    // On real hardware /dev/nvme0n1p2 is typically the host OS (e.g. Ubuntu's ext4 root), so we must
-    // never fall back to a device purely by name — and never suggest formatting it.
-    static constexpr const char* ROOTFS_LABEL = "Cortez-RootFS";
-
     const char* rootDevName = boot::KernelCmdline::instance().getRootDevice();
-    auto&       reg         = drivers::DeviceRegistry::instance();
-
-    drivers::IBlockDevice* rootBdev = nullptr;
-    for (usize i = 0; i < reg.getBlockDeviceCount(); ++i) {
-        drivers::IBlockDevice* dev = reg.getBlockDeviceAt(i);
-        if (dev && str::compare(dev->getLabel(), ROOTFS_LABEL) == 0) {
-            rootBdev = dev;
-            break;
-        }
-    }
+    drivers::IBlockDevice* rootBdev = drivers::storage::StorageManager::instance().resolveRootDevice(rootDevName);
 
     if (!rootBdev) {
-        drivers::IBlockDevice* named = reg.findBlockDevice(rootDevName);
-        if (named) {
-            pr_warn("vfs", "VFS: /dev/%s (label='%s') is not a '%s' partition; refusing to mount it",
-                    named->getName(), named->getLabel(), ROOTFS_LABEL);
-        }
-        pr_err("vfs", "VFS: No '%s' partition found (root='%s'); continuing without a root filesystem",
-               ROOTFS_LABEL, rootDevName);
+        pr_err("vfs", "VFS: No valid root partition found (root='%s'); continuing without a root filesystem",
+               rootDevName ? rootDevName : "");
         return;
     }
 

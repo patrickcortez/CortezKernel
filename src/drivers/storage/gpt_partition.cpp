@@ -38,7 +38,10 @@ void GptPartitionDevice::init(IBlockDevice* parentDisk,
     m_blockCount = (endLba >= startLba) ? (endLba - startLba + 1ULL) : 0ULL;
 
     str::copy(m_name, parentDisk->getName(), sizeof(m_name));
-    str::concat(m_name, "p", sizeof(m_name));
+    usize nameLen = str::length(m_name);
+    if (nameLen > 0 && m_name[nameLen - 1] >= '0' && m_name[nameLen - 1] <= '9') {
+        str::concat(m_name, "p", sizeof(m_name));
+    }
     char numBuf[12];
     str::uintToStr(partIndex, numBuf, 10, 0);
     str::concat(m_name, numBuf, sizeof(m_name));

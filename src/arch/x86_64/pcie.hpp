@@ -26,6 +26,10 @@ struct PciDeviceInfo {
     u8          irqLine;
     phys_addr_t bar0Phys;
     usize       bar0Size;
+    phys_addr_t bar5Phys;
+    usize       bar5Size;
+    phys_addr_t barPhys[6];
+    usize       barSize[6];
 };
 
 class PcieManager final {
@@ -49,6 +53,8 @@ public:
     const PciDeviceInfo* findByClass(u8 classCode, u8 subclass, u8 progIf, usize occurrenceIndex = 0) const noexcept;
     usize                getDeviceCount() const noexcept { return m_deviceCount; }
     const PciDeviceInfo& getDevice(usize idx) const noexcept { return m_devices[idx]; }
+
+    phys_addr_t decodeBar(u8 bus, u8 dev, u8 func, u8 barIdx, usize* outSize) noexcept;
 
 private:
     PcieManager() noexcept = default;

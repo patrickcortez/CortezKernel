@@ -48,16 +48,18 @@ public:
               u64 endLba,
               const char* label) noexcept;
 
-    const char* getName() const noexcept override { return m_name; }
-    u32         getBlockSize() const noexcept override { return m_parent ? m_parent->getBlockSize() : 512; }
-    u64         getBlockCount() const noexcept override { return m_blockCount; }
+    const char*    getName() const noexcept override { return m_name; }
+    StorageBusType getBusType() const noexcept override { return m_parent ? m_parent->getBusType() : StorageBusType::Unknown; }
+    u32            getBlockSize() const noexcept override { return m_parent ? m_parent->getBlockSize() : 512; }
+    u64            getBlockCount() const noexcept override { return m_blockCount; }
 
     Status readBlocks(u64 lba, u32 count, void* buffer) override;
     Status writeBlocks(u64 lba, u32 count, const void* buffer) override;
     Status flush() override;
 
-    u64         getStartLba() const noexcept { return m_startLba; }
-    const char* getLabel() const noexcept override { return m_label; }
+    u64            getStartLba() const noexcept { return m_startLba; }
+    const char*    getLabel() const noexcept override { return m_label; }
+    IBlockDevice*  getParentDisk() const noexcept { return m_parent; }
 
 private:
     IBlockDevice* m_parent     = nullptr;

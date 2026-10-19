@@ -42,6 +42,14 @@ public:
     virtual bool          hasData() const noexcept = 0;
 };
 
+enum class StorageBusType : u8 {
+    Unknown = 0,
+    NVMe    = 1,
+    SATA    = 2,
+    USB     = 3,
+    RAM     = 4,
+};
+
 /**
  * @brief Interface for sector/block-addressable storage devices (NVMe namespaces, GPT partitions).
  */
@@ -53,14 +61,26 @@ public:
         return DeviceType::Block;
     }
 
-    virtual u32    getBlockSize() const noexcept = 0;
-    virtual u64    getBlockCount() const noexcept = 0;
-    virtual Status readBlocks(u64 lba, u32 count, void* buffer) = 0;
-    virtual Status writeBlocks(u64 lba, u32 count, const void* buffer) = 0;
-    virtual Status flush() = 0;
+    virtual u32            getBlockSize() const noexcept = 0;
+    virtual u64            getBlockCount() const noexcept = 0;
+    virtual Status         readBlocks(u64 lba, u32 count, void* buffer) = 0;
+    virtual Status         writeBlocks(u64 lba, u32 count, const void* buffer) = 0;
+    virtual Status         flush() = 0;
 
     /// GPT partition name (empty for whole disks / unlabelled devices).
-    virtual const char* getLabel() const noexcept { return ""; }
+    virtual const char*    getLabel() const noexcept { return ""; }
+
+    /// Underlying storage hardware bus or interface
+    virtual StorageBusType getBusType() const noexcept { return StorageBusType::Unknown; }
+    virtual const char*    getBusTypeName() const noexcept {
+        switch (getBusType()) {
+            case StorageBusType::NVMe: return "NVMe";
+            case StorageBusType::SATA: return "SATA";
+            case StorageBusType::USB:  return "USB";
+            case StorageBusType::RAM:  return "RAM";
+            default:                   return "Unknown";
+        }
+    }
 };
 
 /**

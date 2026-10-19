@@ -37,9 +37,10 @@ public:
                 memory::IPhysicalAllocator* pmm,
                 u64 hhdmOffset) noexcept;
 
-    const char* getName() const noexcept override { return m_name; }
-    u32         getBlockSize() const noexcept override { return m_blockSize; }
-    u64         getBlockCount() const noexcept override { return m_blockCount; }
+    const char*    getName() const noexcept override { return m_name; }
+    StorageBusType getBusType() const noexcept override { return StorageBusType::USB; }
+    u32            getBlockSize() const noexcept override { return m_blockSize; }
+    u64            getBlockCount() const noexcept override { return m_blockCount; }
 
     Status readBlocks(u64 lba, u32 count, void* buffer) override;
     Status writeBlocks(u64 lba, u32 count, const void* buffer) override;

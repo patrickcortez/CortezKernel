@@ -90,23 +90,35 @@ void PcieManager::writeConfig8(u8 bus, u8 dev, u8 func, u16 offset, u8 value) no
     writeConfig32(bus, dev, func, aligned, newVal);
 }
 
-phys_addr_t PcieManager::decodeBar0(u8 bus, u8 dev, u8 func, usize* outSize) noexcept {
-    u32 bar0 = readConfig32(bus, dev, func, 0x10);
-    if ((bar0 & 0x01U) != 0) {
+phys_addr_t PcieManager::decodeBar(u8 bus, u8 dev, u8 func, u8 barIdx, usize* outSize) noexcept {
+    if (barIdx >= 6) {
         if (outSize) *outSize = 0;
-        return 0; // I/O port BAR, not MMIO
+        return 0;
     }
 
-    bool is64Bit = ((bar0 & 0x06U) == 0x04U);
-    u32  bar1    = is64Bit ? readConfig32(bus, dev, func, 0x14) : 0;
+    u16 offset = static_cast<u16>(0x10U + barIdx * 4U);
+    u32 barVal = readConfig32(bus, dev, func, offset);
+    if ((barVal & 0x01U) != 0) {
+        // I/O port BAR
+        if (outSize) *outSize = 0;
+        return static_cast<phys_addr_t>(barVal & ~0x03U);
+    }
 
-    phys_addr_t physBase = static_cast<phys_addr_t>(bar0 & 0xFFFFFFF0U) |
-                           (static_cast<phys_addr_t>(bar1) << 32);
+    bool is64Bit = ((barVal & 0x06U) == 0x04U);
+    u32  barHigh = (is64Bit && barIdx < 5) ? readConfig32(bus, dev, func, offset + 4) : 0;
+
+    phys_addr_t physBase = static_cast<phys_addr_t>(barVal & 0xFFFFFFF0U) |
+                           (static_cast<phys_addr_t>(barHigh) << 32);
 
     if (outSize) {
-        *outSize = 131072; // Default 128 KiB MMIO window covering NVMe & xHCI registers/doorbells
+        *outSize = 131072; // Default 128 KiB MMIO window covering NVMe, xHCI, & AHCI registers
     }
+
     return physBase;
+}
+
+phys_addr_t PcieManager::decodeBar0(u8 bus, u8 dev, u8 func, usize* outSize) noexcept {
+    return decodeBar(bus, dev, func, 0, outSize);
 }
 
 void PcieManager::probeFunction(u8 bus, u8 dev, u8 func) noexcept {
@@ -125,9 +137,6 @@ void PcieManager::probeFunction(u8 bus, u8 dev, u8 func) noexcept {
 
     if (m_deviceCount >= MAX_PCI_DEVICES) return;
 
-    usize bar0Size = 0;
-    phys_addr_t bar0Phys = (headerType == 0x00) ? decodeBar0(bus, dev, func, &bar0Size) : 0;
-
     PciDeviceInfo& info = m_devices[m_deviceCount++];
     info.segment    = 0;
     info.bus        = bus;
@@ -141,8 +150,35 @@ void PcieManager::probeFunction(u8 bus, u8 dev, u8 func) noexcept {
     info.revisionId = revisionId;
     info.headerType = headerType;
     info.irqLine    = irqLine;
-    info.bar0Phys   = bar0Phys;
-    info.bar0Size   = bar0Size;
+
+    for (usize b = 0; b < 6; ++b) {
+        info.barPhys[b] = 0;
+        info.barSize[b] = 0;
+    }
+
+    if (headerType == 0x00) {
+        for (u8 b = 0; b < 6; ++b) {
+            usize bSize = 0;
+            phys_addr_t bPhys = decodeBar(bus, dev, func, b, &bSize);
+            info.barPhys[b] = bPhys;
+            info.barSize[b] = bSize;
+
+            u32 barVal = readConfig32(bus, dev, func, static_cast<u16>(0x10U + b * 4U));
+            if ((barVal & 0x01U) == 0 && ((barVal & 0x06U) == 0x04U)) {
+                // 64-bit BAR occupies two consecutive 32-bit BAR entries
+                if (b < 5) {
+                    info.barPhys[b + 1] = 0;
+                    info.barSize[b + 1] = 0;
+                    ++b;
+                }
+            }
+        }
+    }
+
+    info.bar0Phys = info.barPhys[0];
+    info.bar0Size = info.barSize[0];
+    info.bar5Phys = info.barPhys[5];
+    info.bar5Size = info.barSize[5];
 }
 
 Status PcieManager::init(memory::IVirtualMapper* vmm) noexcept {
