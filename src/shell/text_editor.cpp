@@ -75,6 +75,8 @@ struct EditorBuffer {
     char         lastSearch[96]{};
     char         lastReplace[96]{};
     char         statusMsg[128]{};
+
+    mutable u8   syntaxColors[TextEditor::MAX_LINE_CAP]{};
 };
 
 // =============================================================================
@@ -950,33 +952,82 @@ void computeLineSyntaxColors(const EditorLine& line, bool enableSyntax, u8* outC
     }
 }
 
-void renderShortcutRow(u32 termCols, const ShortcutPair* pairs, usize pairCount) noexcept {
+constexpr u32 ansiCodeToRgb(u8 code) noexcept {
+    switch (code) {
+        case 90: return drivers::video::TerminalDriver::COLOR_BRIGHT_GREY;
+        case 91: return drivers::video::TerminalDriver::COLOR_BRIGHT_RED;
+        case 92: return drivers::video::TerminalDriver::COLOR_BRIGHT_GREEN;
+        case 93: return drivers::video::TerminalDriver::COLOR_BRIGHT_YELLOW;
+        case 94: return drivers::video::TerminalDriver::COLOR_BRIGHT_BLUE;
+        case 95: return drivers::video::TerminalDriver::COLOR_BRIGHT_MAG;
+        case 96: return drivers::video::TerminalDriver::COLOR_BRIGHT_CYAN;
+        case 97: return drivers::video::TerminalDriver::COLOR_BRIGHT_WHITE;
+        case 31: return drivers::video::TerminalDriver::COLOR_RED;
+        case 32: return drivers::video::TerminalDriver::COLOR_GREEN;
+        case 33: return drivers::video::TerminalDriver::COLOR_YELLOW;
+        case 34: return drivers::video::TerminalDriver::COLOR_BLUE;
+        case 35: return drivers::video::TerminalDriver::COLOR_MAGENTA;
+        case 36: return drivers::video::TerminalDriver::COLOR_CYAN;
+        case 37:
+        default: return drivers::video::TerminalDriver::DEFAULT_FG_COLOR;
+    }
+}
+
+void renderShortcutRow(u32 termCols, u32 row, const ShortcutPair* pairs, usize pairCount) noexcept {
+    auto& term = drivers::video::TerminalDriver::instance();
     u32 colWidth = (pairCount > 0) ? (termCols / static_cast<u32>(pairCount)) : termCols;
     if (colWidth < 10) colWidth = 10;
 
-    u32 usedCols = 0;
-    for (usize i = 0; i < pairCount && usedCols + 4 < termCols; ++i) {
-        usize keyLen = str::length(pairs[i].key);
-        kprintf("\033[7m%s\033[27m ", pairs[i].key);
-        usedCols += static_cast<u32>(keyLen + 1);
+    u32 curCol = 0;
+    for (usize i = 0; i < pairCount && curCol + 3 < termCols; ++i) {
+        // Shortcut key (inverted: COLOR_BAR_FG on COLOR_BAR_BG)
+        const char* key = pairs[i].key;
+        usize keyLen    = str::length(key);
+        term.writeStringAt(curCol, row, key, keyLen,
+                           drivers::video::TerminalDriver::COLOR_BAR_FG,
+                           drivers::video::TerminalDriver::COLOR_BAR_BG);
+        curCol += static_cast<u32>(keyLen);
 
-        usize maxLbl = (usedCols < (i + 1) * colWidth) ? ((i + 1) * colWidth - usedCols) : 0;
-        if (i + 1 == pairCount && termCols > usedCols) {
-            maxLbl = termCols - usedCols;
+        // Gap after key
+        if (curCol < termCols) {
+            term.putCellAt(curCol++, row, ' ',
+                           drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                           drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
         }
 
+        // Slot target end column
+        u32 slotEnd = static_cast<u32>((i + 1) * colWidth);
+        if (i + 1 == pairCount || slotEnd > termCols) {
+            slotEnd = termCols;
+        }
+
+        // Label (normal: DEFAULT_FG_COLOR on DEFAULT_BG_COLOR)
         const char* lbl = pairs[i].label;
         usize lblLen    = str::length(lbl);
+        u32 maxLbl      = (slotEnd > curCol) ? (slotEnd - curCol) : 0;
         usize printLen  = (lblLen < maxLbl) ? lblLen : maxLbl;
         if (printLen > 0) {
-            klog::Logger::instance().writeRaw(lbl, printLen);
+            term.writeStringAt(curCol, row, lbl, printLen,
+                               drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                               drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+            curCol += static_cast<u32>(printLen);
         }
-        for (usize pad = printLen; pad < maxLbl; ++pad) {
-            klog::Logger::instance().putChar(' ');
+
+        // Fill rest of slot with spaces
+        if (slotEnd > curCol) {
+            term.fillRowAt(curCol, row, slotEnd - curCol, ' ',
+                           drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                           drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+            curCol = slotEnd;
         }
-        usedCols += static_cast<u32>(maxLbl);
     }
-    kprintf("\033[K\033[0m");
+
+    // Fill remainder of row to right edge
+    if (curCol < termCols) {
+        term.fillRowAt(curCol, row, termCols - curCol, ' ',
+                       drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                       drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+    }
 }
 
 void renderScreen(const EditorBuffer* ed,
@@ -996,113 +1047,158 @@ void renderScreen(const EditorBuffer* ed,
     u32 gutter   = getGutterCols(ed);
     u32 textCols = (termCols > gutter + 1) ? (termCols - gutter - 1) : 1;
 
-    kprintf("\033[?25l\033[1;1H");
+    term.setCursorVisible(false);
 
-    // 1. Top Inverted GNU nano Title Bar
+    // 1. Top Inverted GNU nano Title Bar (Row 0)
     const char* leftTitle  = "  Cortez nano 1.0";
     const char* centerName = ed->filePath[0] ? ed->filePath : "New Buffer";
     const char* rightState = ed->modified
                                  ? (ed->markActive ? "[Mark] Modified  " : "Modified  ")
                                  : (ed->markActive ? "[Mark]           " : "          ");
 
-    char titleBar[256]{};
-    u32 barCols = (termCols < sizeof(titleBar) - 1) ? termCols : static_cast<u32>(sizeof(titleBar) - 1);
-    for (u32 i = 0; i < barCols; ++i) titleBar[i] = ' ';
-    titleBar[barCols] = '\0';
+    term.fillRowAt(0, 0, termCols, ' ',
+                   drivers::video::TerminalDriver::COLOR_BAR_FG,
+                   drivers::video::TerminalDriver::COLOR_BAR_BG);
 
     usize leftLen = str::length(leftTitle);
-    for (usize i = 0; i < leftLen && i < barCols; ++i) titleBar[i] = leftTitle[i];
+    term.writeStringAt(0, 0, leftTitle, leftLen,
+                       drivers::video::TerminalDriver::COLOR_BAR_FG,
+                       drivers::video::TerminalDriver::COLOR_BAR_BG);
 
     usize centerLen = str::length(centerName);
-    usize centerPos = (barCols > centerLen) ? ((barCols - centerLen) / 2) : leftLen + 2;
-    for (usize i = 0; i < centerLen && (centerPos + i) < barCols; ++i) {
-        titleBar[centerPos + i] = centerName[i];
+    u32 centerPos = (termCols > centerLen) ? static_cast<u32>((termCols - centerLen) / 2) : static_cast<u32>(leftLen + 2);
+    if (centerPos < termCols) {
+        term.writeStringAt(centerPos, 0, centerName, centerLen,
+                           drivers::video::TerminalDriver::COLOR_BAR_FG,
+                           drivers::video::TerminalDriver::COLOR_BAR_BG);
     }
 
     usize rightLen = str::length(rightState);
-    if (barCols > rightLen) {
-        usize rightPos = barCols - rightLen;
-        for (usize i = 0; i < rightLen; ++i) {
-            titleBar[rightPos + i] = rightState[i];
-        }
+    if (termCols > rightLen) {
+        u32 rightPos = termCols - static_cast<u32>(rightLen);
+        term.writeStringAt(rightPos, 0, rightState, rightLen,
+                           drivers::video::TerminalDriver::COLOR_BAR_FG,
+                           drivers::video::TerminalDriver::COLOR_BAR_BG);
     }
 
-    kprintf("\033[7m%s\033[K\033[0m\n", titleBar);
-
-    // 2. Document Viewport Rows
-    u8 syntaxColors[TextEditor::MAX_LINE_CAP];
+    // 2. Document Viewport Rows (Rows 1 .. viewRows)
     for (u32 vr = 0; vr < viewRows; ++vr) {
+        u32 row = 1 + vr;
         usize docRow = ed->scrollRow + vr;
         if (docRow < ed->lineCount) {
             const EditorLine& line = ed->lines[docRow];
+
+            // Gutter
+            char leftOverflow = (ed->scrollCol > 0 && line.len > 0) ? '<' : ' ';
             if (ed->showLineNumbers) {
-                char leftOverflow = (ed->scrollCol > 0 && line.len > 0) ? '<' : ' ';
-                kprintf("\033[90m%4zu%c\033[0m ", docRow + 1, leftOverflow);
+                char gbuf[16]{};
+                klibc_snprintf(gbuf, sizeof(gbuf), "%4zu%c ", docRow + 1, leftOverflow);
+                term.writeStringAt(0, row, gbuf, 6,
+                                   drivers::video::TerminalDriver::COLOR_BRIGHT_GREY,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
             } else {
-                char leftOverflow = (ed->scrollCol > 0 && line.len > 0) ? '<' : ' ';
-                kprintf("\033[90m%c\033[0m", leftOverflow);
+                term.putCellAt(0, row, leftOverflow,
+                               drivers::video::TerminalDriver::COLOR_BRIGHT_GREY,
+                               drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
             }
 
-            computeLineSyntaxColors(line, ed->syntaxHighlight, syntaxColors, line.len);
+            computeLineSyntaxColors(line, ed->syntaxHighlight, ed->syntaxColors, line.len);
 
             usize startCol = ed->scrollCol;
             usize availLen = (line.len > startCol) ? (line.len - startCol) : 0;
             bool  hasRightOverflow = (availLen > textCols);
             usize showLen  = hasRightOverflow ? textCols : availLen;
 
-            u8 curColor = 0;
-            bool curInverted = false;
             for (usize i = 0; i < showLen; ++i) {
                 usize docCol = startCol + i;
-                u8 wantColor = syntaxColors[docCol];
-                bool wantInv = isCellMarked(ed, docRow, docCol) || isCellSearchMatch(ed, docRow, docCol);
-                if (wantColor != curColor || wantInv != curInverted) {
-                    if (wantInv) {
-                        kprintf("\033[0;7;%um", wantColor);
-                    } else {
-                        kprintf("\033[0;%um", wantColor);
-                    }
-                    curColor    = wantColor;
-                    curInverted = wantInv;
+                u8 syntaxCode = (docCol < line.len) ? ed->syntaxColors[docCol] : 37;
+                u32 fg = ansiCodeToRgb(syntaxCode);
+                u32 bg = drivers::video::TerminalDriver::DEFAULT_BG_COLOR;
+
+                if (isCellSearchMatch(ed, docRow, docCol)) {
+                    fg = drivers::video::TerminalDriver::DEFAULT_BG_COLOR;
+                    bg = drivers::video::TerminalDriver::COLOR_BRIGHT_YELLOW;
+                } else if (isCellMarked(ed, docRow, docCol)) {
+                    fg = drivers::video::TerminalDriver::COLOR_BAR_FG;
+                    bg = drivers::video::TerminalDriver::COLOR_BAR_BG;
                 }
-                klog::Logger::instance().putChar(line.data[docCol]);
+
+                term.putCellAt(gutter + static_cast<u32>(i), row, line.data[docCol], fg, bg);
             }
-            if (curColor != 0 || curInverted) {
-                kprintf("\033[0m");
+
+            // Fill empty columns after line text up to right margin
+            u32 textEnd = gutter + static_cast<u32>(showLen);
+            u32 rightEdge = gutter + textCols;
+            if (rightEdge > textEnd) {
+                term.fillRowAt(textEnd, row, rightEdge - textEnd, ' ',
+                               drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                               drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
             }
-            if (hasRightOverflow) {
-                kprintf("\033[90m>\033[0m");
-            }
-            kprintf("\033[K\n");
+
+            // Right overflow marker '>' or blank
+            char rightOverflow = hasRightOverflow ? '>' : ' ';
+            term.putCellAt(termCols - 1, row, rightOverflow,
+                           drivers::video::TerminalDriver::COLOR_BRIGHT_GREY,
+                           drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
         } else {
+            // Tilde row beyond end of document
             if (ed->showLineNumbers) {
-                kprintf("\033[90m   ~\033[0m\033[K\n");
+                term.writeStringAt(0, row, "   ~  ", 6,
+                                   drivers::video::TerminalDriver::COLOR_BRIGHT_GREY,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                if (termCols > 6) {
+                    term.fillRowAt(6, row, termCols - 6, ' ',
+                                   drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                }
             } else {
-                kprintf("\033[90m~\033[0m\033[K\n");
+                term.putCellAt(0, row, '~',
+                               drivers::video::TerminalDriver::COLOR_BRIGHT_GREY,
+                               drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                if (termCols > 1) {
+                    term.fillRowAt(1, row, termCols - 1, ' ',
+                                   drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                }
             }
         }
     }
 
-    // 3. Status Bar or Interactive Prompt Bar (Row termRows - 2)
+    // 3. Status Bar or Interactive Prompt Bar (Row termRows - 3)
+    u32 statusRow = termRows - 3;
     u32 promptScreenCol = 1;
     if (activePromptLabel) {
-        kprintf("\033[7m %s%s\033[K\033[0m\n",
-                activePromptLabel,
-                activePromptValue ? activePromptValue : "");
-        promptScreenCol = static_cast<u32>(2 + str::length(activePromptLabel) + promptCursor);
-        if (promptScreenCol > termCols) promptScreenCol = termCols;
+        term.fillRowAt(0, statusRow, termCols, ' ',
+                       drivers::video::TerminalDriver::COLOR_BAR_FG,
+                       drivers::video::TerminalDriver::COLOR_BAR_BG);
+        char promptBuf[256]{};
+        klibc_snprintf(promptBuf, sizeof(promptBuf), " %s%s",
+                       activePromptLabel,
+                       activePromptValue ? activePromptValue : "");
+        usize plen = str::length(promptBuf);
+        term.writeStringAt(0, statusRow, promptBuf, plen,
+                           drivers::video::TerminalDriver::COLOR_BAR_FG,
+                           drivers::video::TerminalDriver::COLOR_BAR_BG);
+        promptScreenCol = static_cast<u32>(1 + str::length(activePromptLabel) + promptCursor);
+        if (promptScreenCol >= termCols) promptScreenCol = termCols - 1;
     } else if (ed->statusMsg[0] != '\0') {
+        term.fillRowAt(0, statusRow, termCols, ' ',
+                       drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                       drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
         char formattedStatus[144]{};
         klibc_snprintf(formattedStatus, sizeof(formattedStatus), "[ %s ]", ed->statusMsg);
         usize slen = str::length(formattedStatus);
         u32 padLeft = (termCols > slen) ? static_cast<u32>((termCols - slen) / 2) : 0;
-        for (u32 p = 0; p < padLeft; ++p) klog::Logger::instance().putChar(' ');
-        kprintf("\033[7m%s\033[0m\033[K\n", formattedStatus);
+        term.writeStringAt(padLeft, statusRow, formattedStatus, slen,
+                           drivers::video::TerminalDriver::COLOR_BAR_FG,
+                           drivers::video::TerminalDriver::COLOR_BAR_BG);
     } else {
-        kprintf("\033[K\n");
+        term.fillRowAt(0, statusRow, termCols, ' ',
+                       drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                       drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
     }
 
-    // 4. Bottom 2-Row GNU nano Shortcut Grid (Rows termRows - 1 and termRows)
+    // 4. Bottom 2-Row GNU nano Shortcut Grid (Rows termRows - 2 and termRows - 1)
     static constexpr ShortcutPair kDefaultRow1[] = {
         { "^G", "Get Help"   },
         { "^O", "Write Out"  },
@@ -1125,18 +1221,21 @@ void renderScreen(const EditorBuffer* ed,
     const ShortcutPair* r2 = customRow2 ? customRow2 : kDefaultRow2;
     usize r2Count          = customRow2 ? customRow2Count : 6;
 
-    renderShortcutRow(termCols, r1, r1Count);
-    klog::Logger::instance().putChar('\n');
-    renderShortcutRow(termCols, r2, r2Count);
+    renderShortcutRow(termCols, termRows - 2, r1, r1Count);
+    renderShortcutRow(termCols, termRows - 1, r2, r2Count);
 
     // 5. Position hardware cursor inside viewport or prompt bar
     if (activePromptLabel) {
-        kprintf("\033[%u;%uH\033[?25h", termRows - 2, promptScreenCol);
+        term.setCursorPos(promptScreenCol, statusRow);
+        term.setCursorVisible(true);
     } else {
-        u32 screenRow = static_cast<u32>((ed->curRow - ed->scrollRow) + 2);
-        u32 screenCol = static_cast<u32>((ed->curCol - ed->scrollCol) + gutter + 1);
-        if (screenCol > termCols) screenCol = termCols;
-        kprintf("\033[%u;%uH\033[?25h", screenRow, screenCol);
+        u32 screenRow = static_cast<u32>((ed->curRow - ed->scrollRow) + 1);
+        u32 screenCol = static_cast<u32>((ed->curCol - ed->scrollCol) + gutter);
+        if (screenRow < 1) screenRow = 1;
+        if (screenRow > viewRows) screenRow = viewRows;
+        if (screenCol >= termCols) screenCol = termCols - 1;
+        term.setCursorPos(screenCol, screenRow);
+        term.setCursorVisible(true);
     }
 }
 
@@ -1329,17 +1428,43 @@ void showHelpScreen() noexcept {
     for (;;) {
         u32 termCols = term.getCols();
         u32 termRows = term.getRows();
+        if (termRows < 6 || termCols < 20) return;
         u32 viewRows = (termRows > 3) ? (termRows - 3) : 1;
 
-        kprintf("\033[?25l\033[1;1H");
-        kprintf("\033[7m  Cortez nano 1.0 — Help Viewer                                                 \033[K\033[0m\n");
+        term.setCursorVisible(false);
 
+        // Title bar (Row 0)
+        term.fillRowAt(0, 0, termCols, ' ',
+                       drivers::video::TerminalDriver::COLOR_BAR_FG,
+                       drivers::video::TerminalDriver::COLOR_BAR_BG);
+        const char* helpTitle = "  Cortez nano 1.0 — Help Viewer";
+        term.writeStringAt(0, 0, helpTitle, str::length(helpTitle),
+                           drivers::video::TerminalDriver::COLOR_BAR_FG,
+                           drivers::video::TerminalDriver::COLOR_BAR_BG);
+
+        // Help lines (Rows 1 .. viewRows)
         for (u32 r = 0; r < viewRows; ++r) {
+            u32 row = 1 + r;
             usize idx = scroll + r;
             if (idx < kHelpCount) {
-                kprintf("  %s\033[K\n", kHelpLines[idx]);
+                term.writeStringAt(0, row, "  ", 2,
+                                   drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                const char* line = kHelpLines[idx];
+                usize len = str::length(line);
+                term.writeStringAt(2, row, line, len,
+                                   drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                if (2 + len < termCols) {
+                    term.fillRowAt(static_cast<u32>(2 + len), row,
+                                   termCols - static_cast<u32>(2 + len), ' ',
+                                   drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                                   drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
+                }
             } else {
-                kprintf("\033[K\n");
+                term.fillRowAt(0, row, termCols, ' ',
+                               drivers::video::TerminalDriver::DEFAULT_FG_COLOR,
+                               drivers::video::TerminalDriver::DEFAULT_BG_COLOR);
             }
         }
 
@@ -1353,9 +1478,8 @@ void showHelpScreen() noexcept {
             { "PgDn", "Page Down" },
             { "Esc",  "Return"    }
         };
-        renderShortcutRow(termCols, kHelpRow1, 3);
-        klog::Logger::instance().putChar('\n');
-        renderShortcutRow(termCols, kHelpRow2, 3);
+        renderShortcutRow(termCols, termRows - 2, kHelpRow1, 3);
+        renderShortcutRow(termCols, termRows - 1, kHelpRow2, 3);
 
         char ch = readKeyBlocking();
         if (ch == '\x18' || ch == '\x11' || ch == '\x07' || ch == 'q' || ch == 'Q') {
@@ -1633,6 +1757,7 @@ Status TextEditor::openAndEdit(const char* cwd,
     }
 
     auto& term = drivers::video::TerminalDriver::instance();
+    term.clear();
 
     enum class EscState : u8 { None, Esc, Bracket, TildeParam };
     EscState escState = EscState::None;
@@ -1834,6 +1959,8 @@ Status TextEditor::openAndEdit(const char* cwd,
                 }
             }
             term.clear();
+            term.setCursorPos(0, 0);
+            term.setCursorVisible(true);
             destroyEditor(ed);
             return Status::Ok;
         }

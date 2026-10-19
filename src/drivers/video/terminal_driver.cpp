@@ -67,11 +67,46 @@ void TerminalDriver::scrollUp() noexcept {
     }
 }
 
+void TerminalDriver::setCursorVisible(bool visible) noexcept {
+    if (m_cursorVisible == visible) return;
+    drawCursor(false);
+    m_cursorVisible = visible;
+    drawCursor(m_cursorVisible);
+}
+
 void TerminalDriver::setCursorPos(u32 col, u32 row) noexcept {
     drawCursor(false);
     m_cursorCol = (col < m_cols) ? col : (m_cols ? m_cols - 1 : 0);
     m_cursorRow = (row < m_rows) ? row : (m_rows ? m_rows - 1 : 0);
     drawCursor(m_cursorVisible);
+}
+
+void TerminalDriver::putCellAt(u32 col, u32 row, char ch, u32 fgColor, u32 bgColor) noexcept {
+    if (!m_fb.isReady() || col >= m_cols || row >= m_rows) return;
+    char renderCh = (static_cast<u8>(ch) >= 0x20U) ? ch : ' ';
+    Cell& curr = m_grid[row][col];
+    if (curr.ch != renderCh || curr.fg != fgColor || curr.bg != bgColor) {
+        curr = { renderCh, fgColor, bgColor };
+        m_fb.drawGlyph8x16(col, row, renderCh, fgColor, bgColor);
+    }
+}
+
+void TerminalDriver::writeStringAt(u32 col, u32 row, const char* str, usize len, u32 fgColor, u32 bgColor) noexcept {
+    if (!str || !m_fb.isReady() || row >= m_rows || col >= m_cols) return;
+    u32 maxCols = m_cols - col;
+    usize count = (len < maxCols) ? len : maxCols;
+    for (usize i = 0; i < count; ++i) {
+        putCellAt(col + static_cast<u32>(i), row, str[i], fgColor, bgColor);
+    }
+}
+
+void TerminalDriver::fillRowAt(u32 col, u32 row, u32 count, char ch, u32 fgColor, u32 bgColor) noexcept {
+    if (!m_fb.isReady() || row >= m_rows || col >= m_cols) return;
+    u32 maxCols = m_cols - col;
+    u32 n = (count < maxCols) ? count : maxCols;
+    for (u32 i = 0; i < n; ++i) {
+        putCellAt(col + i, row, ch, fgColor, bgColor);
+    }
 }
 
 void TerminalDriver::moveCursorLeft(u32 count) noexcept {

@@ -17,6 +17,26 @@ public:
     static constexpr u32 DEFAULT_FG_COLOR = 0xE5E9F0U; // Crisp Nord snow white
     static constexpr u32 DEFAULT_BG_COLOR = 0x0D1117U; // Deep obsidian background
 
+    // Standard high-contrast RGB colors for full-screen UI applications
+    static constexpr u32 COLOR_BLACK         = 0x484F58U;
+    static constexpr u32 COLOR_RED           = 0xFF7B72U;
+    static constexpr u32 COLOR_GREEN         = 0x3FB950U;
+    static constexpr u32 COLOR_YELLOW        = 0xD29922U;
+    static constexpr u32 COLOR_BLUE          = 0x58A6FFU;
+    static constexpr u32 COLOR_MAGENTA       = 0xBC8CFFU;
+    static constexpr u32 COLOR_CYAN          = 0x39C5CFU;
+    static constexpr u32 COLOR_WHITE         = 0xE5E9F0U;
+    static constexpr u32 COLOR_BRIGHT_GREY   = 0x8B949EU;
+    static constexpr u32 COLOR_BRIGHT_RED    = 0xFFA198U;
+    static constexpr u32 COLOR_BRIGHT_GREEN  = 0x56D364U;
+    static constexpr u32 COLOR_BRIGHT_YELLOW = 0xE3B341U;
+    static constexpr u32 COLOR_BRIGHT_BLUE   = 0x79C0FFU;
+    static constexpr u32 COLOR_BRIGHT_MAG    = 0xD2A8FFU;
+    static constexpr u32 COLOR_BRIGHT_CYAN   = 0x56D4DDU;
+    static constexpr u32 COLOR_BRIGHT_WHITE  = 0xFFFFFFU;
+    static constexpr u32 COLOR_BAR_BG        = 0xC9D1D9U; // Inverted title/status bar background
+    static constexpr u32 COLOR_BAR_FG        = 0x0D1117U; // Inverted title/status bar text
+
     static TerminalDriver& instance() noexcept;
 
     Status init(const boot::FramebufferInfo& fbInfo) noexcept;
@@ -29,12 +49,18 @@ public:
     void clear() noexcept;
     void putChar(char c) noexcept;
     void drawCursor(bool visible) noexcept;
+    void setCursorVisible(bool visible) noexcept;
 
     u32  getCols() const noexcept { return m_cols; }
     u32  getRows() const noexcept { return m_rows; }
     u32  getCursorCol() const noexcept { return m_cursorCol; }
     u32  getCursorRow() const noexcept { return m_cursorRow; }
     void setCursorPos(u32 col, u32 row) noexcept;
+
+    // Direct, flicker-free cell and row rendering with differential caching
+    void putCellAt(u32 col, u32 row, char ch, u32 fgColor, u32 bgColor) noexcept;
+    void writeStringAt(u32 col, u32 row, const char* str, usize len, u32 fgColor, u32 bgColor) noexcept;
+    void fillRowAt(u32 col, u32 row, u32 count, char ch, u32 fgColor, u32 bgColor) noexcept;
 
 private:
     struct Cell {
