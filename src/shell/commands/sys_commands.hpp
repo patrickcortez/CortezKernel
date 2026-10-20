@@ -137,4 +137,20 @@ public:
     Status      execute(const CommandArgs& args) override;
 };
 
+class ChkbdCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "chkbd"; }
+    const char* getUsage() const noexcept override { return "chkbd [device_name]"; }
+    const char* getDescription() const noexcept override { return "View or switch the MAIN keyboard (e.g. chkbd ukbd0, chkbd kbd0)"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
+class InstallCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "install"; }
+    const char* getUsage() const noexcept override { return "install [target_disk]"; }
+    const char* getDescription() const noexcept override { return "Find unallocated space, format, install Cortez OS, and write UEFI bootloader"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
 } // namespace cortez::shell::commands

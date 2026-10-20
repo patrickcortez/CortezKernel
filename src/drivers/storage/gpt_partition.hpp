@@ -76,6 +76,7 @@ public:
     static GptPartitionScanner& instance() noexcept;
 
     Status scanDisk(IBlockDevice* disk) noexcept;
+    void   unregisterDiskPartitions(IBlockDevice* parentDisk) noexcept;
 
     usize                     getPartitionCount() const noexcept { return m_partCount; }
     GptPartitionDevice*       getPartition(usize idx) noexcept {

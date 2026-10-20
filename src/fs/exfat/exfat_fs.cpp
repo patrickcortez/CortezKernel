@@ -488,8 +488,11 @@ Status ExFatFileSystem::mount(drivers::IBlockDevice* dev) {
         }
     }
 
-    // Load Allocation Bitmap into memory cache
+    // Load Allocation Bitmap into memory cache (capped at 128 KiB to prevent heap starvation)
     u32 bitmapAllocBytes = static_cast<u32>(alignUp(m_bitmapByteLen, m_clusterBytes));
+    if (bitmapAllocBytes > 128 * 1024) {
+        bitmapAllocBytes = 128 * 1024;
+    }
     m_bitmap = new u8[bitmapAllocBytes];
     if (!m_bitmap) {
         delete[] rootBuf;
@@ -497,6 +500,7 @@ Status ExFatFileSystem::mount(drivers::IBlockDevice* dev) {
     }
 
     u32 bitmapClusters = bitmapAllocBytes / m_clusterBytes;
+    if (bitmapClusters > 16) bitmapClusters = 16;
     for (u32 i = 0; i < bitmapClusters; ++i) {
         readCluster(m_bitmapCluster + i, m_bitmap + i * m_clusterBytes);
     }
@@ -529,9 +533,17 @@ Status ExFatFileSystem::statFs(FsStat* outStat) const noexcept {
     outStat->totalClusters = m_clusterCount;
 
     u32 freeCount = 0;
-    for (u32 c = EXFAT_CLUSTER_FIRST; c < m_clusterCount + EXFAT_CLUSTER_FIRST; ++c) {
-        if (!isClusterAllocated(c)) {
-            ++freeCount;
+    if (m_bitmap) {
+        u32 maxBytes = (m_bitmapByteLen < 128 * 1024) ? m_bitmapByteLen : (128 * 1024);
+        for (u32 b = 0; b < maxBytes; ++b) {
+            u8 byteVal = m_bitmap[b];
+            if (byteVal == 0x00U) {
+                freeCount += 8;
+            } else if (byteVal != 0xFFU) {
+                for (u32 bit = 0; bit < 8; ++bit) {
+                    if (!(byteVal & (1U << bit))) ++freeCount;
+                }
+            }
         }
     }
 

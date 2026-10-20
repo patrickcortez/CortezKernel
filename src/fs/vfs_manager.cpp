@@ -27,7 +27,8 @@ Status VfsManager::mountBlockRoot(drivers::IBlockDevice* rootBdev) noexcept {
         return st;
     }
 
-    m_rootFs = exfatFs;
+    m_rootFs   = exfatFs;
+    m_rootBdev = rootBdev;
     pr_ok("vfs", "VFS: Mounted root (%s filesystem) on /dev/%s as '/'",
           m_rootFs->getFsName(), rootBdev->getName());
     return Status::Ok;
@@ -40,6 +41,20 @@ Result<IVfsNode*> VfsManager::resolvePath(const char* cwd, const char* path) noe
 
     char canonical[PathResolver::MAX_PATH_LEN]{};
     PathResolver::normalize(cwd, path, canonical, sizeof(canonical));
+
+    // Check mount points (longest prefix match)
+    for (usize i = 0; i < m_mountCount; ++i) {
+        if (!m_mounts[i].fs || !m_mounts[i].fs->getRootNode()) continue;
+        usize mlen = str::length(m_mounts[i].path);
+        if (str::compare(canonical, m_mounts[i].path) == 0) {
+            return m_mounts[i].fs->getRootNode();
+        }
+        if (str::compareN(canonical, m_mounts[i].path, mlen) == 0 && canonical[mlen] == '/') {
+            const char* subpath = canonical + mlen;
+            return PathResolver::resolveNode(m_mounts[i].fs->getRootNode(), subpath);
+        }
+    }
+
     return PathResolver::resolveNode(m_rootFs->getRootNode(), canonical);
 }
 
@@ -137,7 +152,7 @@ Status VfsManager::createFile(const char* cwd, const char* path) noexcept {
 
     if (!leafName[0]) return Status::InvalidArgument;
 
-    auto parentRes = PathResolver::resolveNode(m_rootFs->getRootNode(), parentPath);
+    auto parentRes = resolvePath(cwd, parentPath);
     if (parentRes.isError()) return parentRes.status();
 
     auto createRes = parentRes.value()->createFile(leafName);
@@ -157,7 +172,7 @@ Status VfsManager::mkdir(const char* cwd, const char* path) noexcept {
 
     if (!leafName[0]) return Status::InvalidArgument;
 
-    auto parentRes = PathResolver::resolveNode(m_rootFs->getRootNode(), parentPath);
+    auto parentRes = resolvePath(cwd, parentPath);
     if (parentRes.isError()) return parentRes.status();
 
     auto createRes = parentRes.value()->createDir(leafName);
@@ -176,7 +191,7 @@ Status VfsManager::unlink(const char* cwd, const char* path) noexcept {
     char leafName[64]{};
     PathResolver::splitParentAndLeaf(canonical, parentPath, sizeof(parentPath), leafName, sizeof(leafName));
 
-    auto parentRes = PathResolver::resolveNode(m_rootFs->getRootNode(), parentPath);
+    auto parentRes = resolvePath(cwd, parentPath);
     if (parentRes.isError()) return parentRes.status();
 
     return parentRes.value()->remove(leafName);
@@ -204,8 +219,64 @@ Status VfsManager::writeFileAll(const char* cwd, const char* path, const void* d
     return wRes.isOk() ? Status::Ok : wRes.status();
 }
 
+Status VfsManager::mount(const char* mountpoint, IFileSystem* fs, drivers::IBlockDevice* bdev) noexcept {
+    if (!mountpoint || !fs) return Status::InvalidArgument;
+    if (m_mountCount >= MAX_MOUNTS) return Status::NoSpace;
+
+    char canonical[sizeof(MountPoint::path)]{};
+    PathResolver::normalize("/", mountpoint, canonical, sizeof(canonical));
+
+    for (usize i = 0; i < m_mountCount; ++i) {
+        if (str::compare(m_mounts[i].path, canonical) == 0) {
+            return Status::AlreadyExists;
+        }
+    }
+
+    str::copy(m_mounts[m_mountCount].path, canonical, sizeof(m_mounts[m_mountCount].path));
+    m_mounts[m_mountCount].fs   = fs;
+    m_mounts[m_mountCount].bdev = bdev;
+    ++m_mountCount;
+
+    pr_dbg("vfs", "Mounted %s (%s) at '%s'",
+          bdev ? bdev->getName() : "virtual", fs->getFsName(), canonical);
+    return Status::Ok;
+}
+
+Status VfsManager::unmount(const char* mountpoint) noexcept {
+    if (!mountpoint) return Status::InvalidArgument;
+
+    char canonical[sizeof(MountPoint::path)]{};
+    PathResolver::normalize("/", mountpoint, canonical, sizeof(canonical));
+
+    for (usize i = 0; i < m_mountCount; ++i) {
+        if (str::compare(m_mounts[i].path, canonical) == 0) {
+            if (m_mounts[i].fs) {
+                (void)m_mounts[i].fs->sync();
+            }
+            pr_dbg("vfs", "Unmounted '%s'", canonical);
+            for (usize j = i; j + 1 < m_mountCount; ++j) {
+                m_mounts[j] = m_mounts[j + 1];
+            }
+            m_mounts[--m_mountCount] = {};
+            return Status::Ok;
+        }
+    }
+    return Status::NotFound;
+}
+
 Status VfsManager::sync() noexcept {
-    return m_rootFs ? m_rootFs->sync() : Status::DeviceNotFound;
+    Status st = Status::Ok;
+    if (m_rootFs) {
+        Status s = m_rootFs->sync();
+        if (s != Status::Ok) st = s;
+    }
+    for (usize i = 0; i < m_mountCount; ++i) {
+        if (m_mounts[i].fs) {
+            Status s = m_mounts[i].fs->sync();
+            if (s != Status::Ok) st = s;
+        }
+    }
+    return st;
 }
 
 } // namespace cortez::fs

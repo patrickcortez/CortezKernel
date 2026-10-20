@@ -19,6 +19,7 @@
 #include "../drivers/i_device.hpp"
 #include "../drivers/video/terminal_driver.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
+#include "../drivers/input/input_manager.hpp"
 #include "../drivers/storage/storage_manager.hpp"
 #include "../drivers/storage/nvme_controller.hpp"
 #include "../drivers/storage/gpt_partition.hpp"
@@ -97,6 +98,7 @@ void Kernel::initIrqAndTimers() noexcept {
     auto& kbd = drivers::input::Ps2KeyboardDriver::instance();
     if (kbd.init() == Status::Ok) {
         drivers::DeviceRegistry::instance().registerCharDevice(&kbd);
+        drivers::input::InputManager::instance().registerDevice(&kbd);
     }
 }
 
@@ -117,6 +119,7 @@ void Kernel::mountBlockRoot() noexcept {
     if (!rootBdev) {
         pr_err("vfs", "VFS: No valid root partition found (root='%s'); continuing without a root filesystem",
                rootDevName ? rootDevName : "");
+        drivers::storage::StorageManager::instance().mountAllUsbStorages();
         return;
     }
 
@@ -124,14 +127,18 @@ void Kernel::mountBlockRoot() noexcept {
     if (st != Status::Ok) {
         pr_warn("vfs", "VFS: Failed to mount /dev/%s (%s); run 'mkfs.exfat %s' in shell",
                 rootBdev->getName(), statusToString(st), rootBdev->getName());
+        drivers::storage::StorageManager::instance().mountAllUsbStorages();
         return;
     }
 
     // Bind standard console streams (fd 0=stdin, fd 1=stdout, fd 2=stderr)
     fs::VfsManager::instance().getKernelFdTable().bindStdStreams(
-        &drivers::input::Ps2KeyboardDriver::instance(),
+        &drivers::input::InputManager::instance(),
         &drivers::video::TerminalDriver::instance(),
         &drivers::video::TerminalDriver::instance());
+
+    (void)fs::VfsManager::instance().mkdir("/", "/usb");
+    drivers::storage::StorageManager::instance().mountAllUsbStorages();
 
     // Persist early kernel boot log to /var/log/dmesg.log on the physical root disk
     (void)fs::VfsManager::instance().mkdir("/", "/var");
@@ -169,7 +176,8 @@ void Kernel::kernelInitTask() {
 
 void Kernel::kworkerTask() {
     for (;;) {
-        proc::Scheduler::instance().yield();
+        drivers::usb::XhciManager::instance().pollEventsAndPorts();
+        proc::Scheduler::instance().sleepMs(100);
     }
 }
 

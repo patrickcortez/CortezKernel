@@ -11,10 +11,11 @@
 namespace cortez::klog {
 
 enum class Level : u8 {
-    Info  = 0,
-    Ok    = 1,
-    Warn  = 2,
-    Error = 3
+    Debug = 0,
+    Info  = 1,
+    Ok    = 2,
+    Warn  = 3,
+    Error = 4
 };
 
 /**
@@ -51,6 +52,9 @@ private:
 };
 
 } // namespace cortez::klog
+
+#define pr_dbg(subsys, fmt, ...) \
+    ::cortez::klog::Logger::instance().log(::cortez::klog::Level::Debug, subsys, fmt, ##__VA_ARGS__)
 
 #define pr_info(subsys, fmt, ...) \
     ::cortez::klog::Logger::instance().log(::cortez::klog::Level::Info, subsys, fmt, ##__VA_ARGS__)

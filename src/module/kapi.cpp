@@ -9,6 +9,7 @@
 #include "../lib/printk.hpp"
 #include "../lib/string_utils.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
+#include "../drivers/input/input_manager.hpp"
 #include "../drivers/i_device.hpp"
 #include "../memory/heap_allocator.hpp"
 #include "../memory/pmm_bitmap.hpp"
@@ -51,7 +52,8 @@ void k_log(int level, const char* subsys, const char* fmt, ...) {
     va_end(args);
 
     cortez::klog::Level lvl = cortez::klog::Level::Info;
-    if (level == 1)      lvl = cortez::klog::Level::Ok;
+    if (level <= 0)      lvl = cortez::klog::Level::Debug;
+    else if (level == 1) lvl = cortez::klog::Level::Ok;
     else if (level == 2) lvl = cortez::klog::Level::Warn;
     else if (level >= 3) lvl = cortez::klog::Level::Error;
 
@@ -60,8 +62,8 @@ void k_log(int level, const char* subsys, const char* fmt, ...) {
 
 int k_getchar(void) {
     char c = 0;
-    auto& kbd = cortez::drivers::input::Ps2KeyboardDriver::instance();
-    auto res = kbd.read(&c, 1);
+    auto& cin = cortez::drivers::input::InputManager::instance();
+    auto res = cin.read(&c, 1);
     if (res.isError() || res.value() == 0) {
         return -1;
     }
@@ -69,7 +71,7 @@ int k_getchar(void) {
 }
 
 bool k_kbhit(void) {
-    return cortez::drivers::input::Ps2KeyboardDriver::instance().hasData();
+    return cortez::drivers::input::InputManager::instance().hasData();
 }
 
 /* ============================================================================

@@ -5,6 +5,7 @@
 
 #include "text_editor.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
+#include "../drivers/input/input_manager.hpp"
 #include "../drivers/video/terminal_driver.hpp"
 #include "../fs/vfs_manager.hpp"
 #include "../fs/path_resolver.hpp"
@@ -1244,14 +1245,14 @@ void renderScreen(const EditorBuffer* ed,
 // =============================================================================
 
 char readKeyBlocking() noexcept {
-    auto& kbd = drivers::input::Ps2KeyboardDriver::instance();
-    if (!kbd.hasData()) {
-        kbd.pollHardware();
-        if (!kbd.hasData()) {
+    auto& cin = drivers::input::InputManager::instance();
+    if (!cin.hasData()) {
+        cin.pollHardware();
+        if (!cin.hasData()) {
             proc::Scheduler::instance().yield();
         }
     }
-    return kbd.readCharBlocking();
+    return cin.readCharBlocking();
 }
 
 bool promptLineInput(EditorBuffer* ed,
@@ -1486,9 +1487,9 @@ void showHelpScreen() noexcept {
             break;
         }
         if (ch == '\033') {
-            auto& kbd = drivers::input::Ps2KeyboardDriver::instance();
-            kbd.pollHardware();
-            if (!kbd.hasData()) break;
+            auto& cin = drivers::input::InputManager::instance();
+            cin.pollHardware();
+            if (!cin.hasData()) break;
             char c1 = readKeyBlocking();
             if (c1 == '[' || c1 == 'O') {
                 char c2 = readKeyBlocking();

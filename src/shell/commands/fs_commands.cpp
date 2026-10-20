@@ -6,6 +6,9 @@
 #include "fs_commands.hpp"
 #include "../../fs/vfs_manager.hpp"
 #include "../../fs/exfat/exfat_fs.hpp"
+#include "../../fs/fat/fat32_fs.hpp"
+#include "../../fs/fs_detector.hpp"
+#include "../../drivers/i_device.hpp"
 #include "../../proc/scheduler.hpp"
 #include "../../lib/string_utils.hpp"
 #include "../../lib/printk.hpp"
@@ -268,6 +271,96 @@ Status MkfsCommand::execute(const CommandArgs& args) {
                 bdev->getName(), label);
     }
     return st;
+}
+
+Status MountCommand::execute(const CommandArgs& args) {
+    auto& vfs = fs::VfsManager::instance();
+    if (args.argc < 2) {
+        kprintf("  \033[90m%-16s %-12s %s\033[0m\n", "TARGET", "FILESYSTEM", "SOURCE");
+        for (usize i = 0; i < vfs.getMountCount(); ++i) {
+            const auto* m = vfs.getMountAt(i);
+            if (!m) continue;
+            kprintf("  \033[36m%-16s\033[0m %-12s %s\n",
+                    m->path,
+                    m->fs ? m->fs->getFsName() : "unknown",
+                    m->bdev ? m->bdev->getName() : "virtual");
+        }
+        return Status::Ok;
+    }
+
+    if (args.argc < 3) {
+        kprintf("Usage: %s\n", getUsage());
+        return Status::InvalidArgument;
+    }
+
+    const char* devName = args.argv[1];
+    if (str::compareN(devName, "/dev/", 5) == 0) devName += 5;
+    const char* mountPoint = args.argv[2];
+
+    auto* bdev = drivers::DeviceRegistry::instance().findBlockDevice(devName);
+    if (!bdev) {
+        kprintf("\033[31mBlock device '/dev/%s' not found.\033[0m\n", devName);
+        return Status::DeviceNotFound;
+    }
+
+    auto probe = fs::FsDetector::probe(bdev);
+    fs::IFileSystem* targetFs = nullptr;
+    if (probe.type == fs::DetectedFsType::Fat32 ||
+        probe.type == fs::DetectedFsType::Fat16 ||
+        probe.type == fs::DetectedFsType::Fat12) {
+        targetFs = new fs::fat::Fat32FileSystem();
+    } else {
+        targetFs = new fs::exfat::ExFatFileSystem();
+    }
+
+    if (!targetFs || targetFs->mount(bdev) != Status::Ok) {
+        delete targetFs;
+        targetFs = new fs::fat::Fat32FileSystem();
+        if (targetFs->mount(bdev) != Status::Ok) {
+            delete targetFs;
+            kprintf("\033[31mFailed to mount /dev/%s: unsupported or corrupted filesystem.\033[0m\n", devName);
+            return Status::CorruptedFs;
+        }
+    }
+
+    (void)vfs.mkdir("/", mountPoint);
+    Status st = vfs.mount(mountPoint, targetFs, bdev);
+    if (st == Status::Ok) {
+        kprintf("\033[32mMounted /dev/%s (%s) on '%s'.\033[0m\n",
+                bdev->getName(), targetFs->getFsName(), mountPoint);
+    } else {
+        delete targetFs;
+        kprintf("\033[31mMount failed: %s\033[0m\n", statusToString(st));
+    }
+    return st;
+}
+
+Status UmountCommand::execute(const CommandArgs& args) {
+    if (args.argc < 2) {
+        kprintf("Usage: %s\n", getUsage());
+        return Status::InvalidArgument;
+    }
+
+    const char* target = args.argv[1];
+    auto& vfs = fs::VfsManager::instance();
+    for (usize i = 0; i < vfs.getMountCount(); ++i) {
+        const auto* m = vfs.getMountAt(i);
+        if (m && (str::compare(m->path, target) == 0 ||
+                  (m->bdev && str::compare(m->bdev->getName(), target) == 0))) {
+            char mpath[64]{};
+            str::copy(mpath, m->path, sizeof(mpath));
+            auto* targetFs = m->fs;
+            Status st = vfs.unmount(mpath);
+            delete targetFs;
+            if (st == Status::Ok) {
+                kprintf("\033[32mUnmounted '%s'.\033[0m\n", mpath);
+            }
+            return st;
+        }
+    }
+
+    kprintf("\033[31mNo mount point found matching '%s'.\033[0m\n", target);
+    return Status::NotFound;
 }
 
 } // namespace cortez::shell::commands

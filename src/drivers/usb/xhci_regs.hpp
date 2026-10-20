@@ -72,6 +72,8 @@ constexpr u32 XHCI_PORTSC_CHANGE_BITS = XHCI_PORTSC_CSC | XHCI_PORTSC_PEC | XHCI
                                         XHCI_PORTSC_OCC | XHCI_PORTSC_PRC | XHCI_PORTSC_PLC |
                                         XHCI_PORTSC_CEC;
 
+constexpr u32 XHCI_PORTSC_PLS_MASK    = (0x0FU << 5); // Port Link State (bits 5..8, 0 = U0)
+
 // Port Speed IDs (PORTSC bits 10..13)
 constexpr u8 XHCI_SPEED_FULL       = 1; // 12 Mbps (USB 1.1)
 constexpr u8 XHCI_SPEED_LOW        = 2; // 1.5 Mbps (USB 1.0)
@@ -92,6 +94,31 @@ constexpr u32 XHCI_IR_ERDP   = 0x18; // Event Ring Dequeue Pointer (64-bit, Bit 
 // Extended Capability IDs
 constexpr u8 XHCI_EXT_CAP_LEGACY = 1; // USB Legacy Support (USBLEGSUP)
 constexpr u8 XHCI_EXT_CAP_PROTO  = 2; // Supported Protocol Capability
+
+/**
+ * @brief Represents a physical root hub protocol port range from an xHCI Supported Protocol capability (§7.2).
+ */
+struct XhciProtocolRange {
+    u8 majorRev   = 0; // 2 for USB 2.0, 3 for USB 3.x
+    u8 minorRev   = 0; // e.g., 0x00, 0x10, 0x20
+    u8 portOffset = 0; // 1-based index of first compatible port
+    u8 portCount  = 0; // Number of consecutive compatible ports
+};
+
+// Port Link State values (bits 5..8 of PORTSC)
+constexpr u32 XHCI_PLS_U0         = 0;
+constexpr u32 XHCI_PLS_U1         = 1;
+constexpr u32 XHCI_PLS_U2         = 2;
+constexpr u32 XHCI_PLS_U3         = 3; // Suspend
+constexpr u32 XHCI_PLS_DISABLED   = 4;
+constexpr u32 XHCI_PLS_RXDETECT   = 5;
+constexpr u32 XHCI_PLS_INACTIVE   = 6;
+constexpr u32 XHCI_PLS_POLLING    = 7;
+constexpr u32 XHCI_PLS_RECOVERY   = 8;
+constexpr u32 XHCI_PLS_HOT_RESET  = 9;
+constexpr u32 XHCI_PLS_COMPLIANCE = 10;
+constexpr u32 XHCI_PLS_TEST_MODE  = 11;
+constexpr u32 XHCI_PLS_RESUME     = 15;
 
 // =============================================================================
 // xHCI Transfer Request Block (TRB) Types & Completion Codes
@@ -229,6 +256,11 @@ constexpr u8 USB_REQ_CLEAR_FEATURE     = 0x01;
 constexpr u8 USB_REQ_SET_ADDRESS       = 0x05;
 constexpr u8 USB_REQ_GET_DESCRIPTOR    = 0x06;
 constexpr u8 USB_REQ_SET_CONFIGURATION = 0x09;
+constexpr u8 USB_REQ_SET_INTERFACE     = 0x0B;
+
+// USB Mass Storage Class-Specific Requests (BOT §3)
+constexpr u8 USB_REQ_MSC_GET_MAX_LUN   = 0xFE;
+constexpr u8 USB_REQ_MSC_RESET         = 0xFF; // Bulk-Only Mass Storage Reset
 
 constexpr u8 USB_DESC_DEVICE           = 0x01;
 constexpr u8 USB_DESC_CONFIGURATION    = 0x02;
@@ -334,6 +366,19 @@ constexpr u8  SCSI_CMD_SYNC_CACHE10    = 0x35;
 constexpr u8  SCSI_CMD_READ16          = 0x88;
 constexpr u8  SCSI_CMD_WRITE16         = 0x8A;
 constexpr u8  SCSI_CMD_SERVICE_ACT_IN  = 0x9E; // Subcode 0x10 = READ CAPACITY (16)
+
+// Standard SCSI Sense Keys (Fixed Sense byte 2 bits 0..3)
+constexpr u8  SCSI_SENSE_NO_SENSE         = 0x00;
+constexpr u8  SCSI_SENSE_RECOVERED_ERROR  = 0x01;
+constexpr u8  SCSI_SENSE_NOT_READY        = 0x02;
+constexpr u8  SCSI_SENSE_MEDIUM_ERROR     = 0x03;
+constexpr u8  SCSI_SENSE_HARDWARE_ERROR   = 0x04;
+constexpr u8  SCSI_SENSE_ILLEGAL_REQUEST  = 0x05;
+constexpr u8  SCSI_SENSE_UNIT_ATTENTION   = 0x06;
+
+// Common SCSI Additional Sense Codes (ASC)
+constexpr u8  SCSI_ASC_NOT_READY_TO_READY = 0x28; // Not Ready to Ready transition
+constexpr u8  SCSI_ASC_MEDIUM_NOT_PRESENT = 0x3A; // Medium Not Present
 
 /**
  * @brief 31-byte USB Mass Storage Command Block Wrapper (CBW).

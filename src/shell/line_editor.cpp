@@ -6,6 +6,7 @@
 #include "line_editor.hpp"
 #include "shell.hpp"
 #include "../drivers/input/ps2_keyboard.hpp"
+#include "../drivers/input/input_manager.hpp"
 #include "../drivers/video/terminal_driver.hpp"
 #include "../fs/vfs_manager.hpp"
 #include "../proc/scheduler.hpp"
@@ -86,16 +87,16 @@ void LineEditor::readLine(char* outBuf, usize maxLen) noexcept {
     EscState escState = EscState::None;
     u32      escParam = 0;
 
-    auto& kbd = drivers::input::Ps2KeyboardDriver::instance();
+    auto& cin = drivers::input::InputManager::instance();
 
     auto readNextKey = [&]() -> char {
-        if (!kbd.hasData()) {
-            kbd.pollHardware();
-            if (!kbd.hasData()) {
+        if (!cin.hasData()) {
+            cin.pollHardware();
+            if (!cin.hasData()) {
                 proc::Scheduler::instance().yield();
             }
         }
-        return kbd.readCharBlocking();
+        return cin.readCharBlocking();
     };
 
     for (;;) {

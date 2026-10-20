@@ -83,7 +83,7 @@ Status GptPartitionScanner::scanDisk(IBlockDevice* disk) noexcept {
 
     const auto* hdr = reinterpret_cast<const GptHeader*>(sectorBuf);
     if (str::compareN(hdr->signature, "EFI PART", 8) != 0) {
-        pr_warn("gpt", "No valid GPT signature ('EFI PART') on /dev/%s LBA 1", disk->getName());
+        pr_dbg("gpt", "No valid GPT signature ('EFI PART') on /dev/%s LBA 1", disk->getName());
         return Status::NotFound;
     }
 
@@ -116,7 +116,7 @@ Status GptPartitionScanner::scanDisk(IBlockDevice* disk) noexcept {
                 DeviceRegistry::instance().registerBlockDevice(&part);
 
                 u64 sizeMiB = (part.getBlockCount() * blockSize) / (1024ULL * 1024ULL);
-                pr_ok("gpt", " /dev/%s: LBA %llu..%llu (%llu MiB) Label='%s'",
+                pr_dbg("gpt", " /dev/%s: LBA %llu..%llu (%llu MiB) Label='%s'",
                       part.getName(), entry->startingLba, entry->endingLba, sizeMiB, label);
             }
             ++partNumber;
@@ -124,6 +124,21 @@ Status GptPartitionScanner::scanDisk(IBlockDevice* disk) noexcept {
     }
 
     return (m_partCount > 0) ? Status::Ok : Status::NotFound;
+}
+
+void GptPartitionScanner::unregisterDiskPartitions(IBlockDevice* parentDisk) noexcept {
+    if (!parentDisk) return;
+    for (usize i = 0; i < m_partCount; ) {
+        if (m_partitions[i].getParentDisk() == parentDisk) {
+            DeviceRegistry::instance().unregisterBlockDevice(&m_partitions[i]);
+            for (usize j = i; j + 1 < m_partCount; ++j) {
+                m_partitions[j] = m_partitions[j + 1];
+            }
+            --m_partCount;
+        } else {
+            ++i;
+        }
+    }
 }
 
 } // namespace cortez::drivers::storage

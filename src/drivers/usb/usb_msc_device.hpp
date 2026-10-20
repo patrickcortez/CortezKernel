@@ -46,15 +46,20 @@ public:
     Status writeBlocks(u64 lba, u32 count, const void* buffer) override;
     Status flush() override;
 
-    bool        isReady() const noexcept { return m_ready; }
-    u8          getSlotId() const noexcept { return m_slotId; }
-    u8          getPortNumber() const noexcept { return m_portNum; }
-    u8          getSpeedId() const noexcept { return m_speedId; }
-    u16         getUsbVendorId() const noexcept { return m_usbVid; }
-    u16         getUsbProductId() const noexcept { return m_usbPid; }
+    void deinit() noexcept;
+    void markDisconnected() noexcept { m_ready = false; }
+    bool isActive() const noexcept { return m_active; }
+    bool isReady() const noexcept { return m_ready; }
+    u8   getSlotId() const noexcept { return m_slotId; }
+    u8   getPortNumber() const noexcept { return m_portNum; }
+    u8   getSpeedId() const noexcept { return m_speedId; }
+    u16  getUsbVendorId() const noexcept { return m_usbVid; }
+    u16  getUsbProductId() const noexcept { return m_usbPid; }
     const char* getVendorString() const noexcept { return m_vendorStr; }
     const char* getProductString() const noexcept { return m_productStr; }
     const char* getRevisionString() const noexcept { return m_revisionStr; }
+
+    Status botResetRecovery() noexcept;
 
     XhciTrbRing& getBulkInRing() noexcept { return m_bulkInRing; }
     XhciTrbRing& getBulkOutRing() noexcept { return m_bulkOutRing; }
@@ -93,8 +98,10 @@ private:
     XhciTrbRing     m_bulkInRing{};
     XhciTrbRing     m_bulkOutRing{};
 
-    phys_addr_t     m_dmaPagePhys   = 0;
-    u8*             m_dmaPageVirt   = nullptr;
+    phys_addr_t                 m_dmaPagePhys = 0;
+    u8*                         m_dmaPageVirt = nullptr;
+    memory::IPhysicalAllocator* m_pmm         = nullptr;
+    bool                        m_active      = false;
 
     char            m_name[16]{};
     char            m_vendorStr[12]{};

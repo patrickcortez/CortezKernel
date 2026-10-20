@@ -47,6 +47,7 @@ Status UsbMscDevice::init(XhciController* ctrl,
     if (!ctrl || !pmm) return Status::InvalidArgument;
 
     m_ctrl          = ctrl;
+    m_pmm           = pmm;
     m_slotId        = slotId;
     m_portNum       = portNum;
     m_speedId       = speedId;
@@ -57,6 +58,7 @@ Status UsbMscDevice::init(XhciController* ctrl,
     m_bulkOutDci    = bulkOutDci;
     m_bulkInEpAddr  = bulkInEpAddr;
     m_bulkOutEpAddr = bulkOutEpAddr;
+    m_active        = true;
 
     // Build block device name: "usb0", "usb1", ...
     str::copy(m_name, "usb", sizeof(m_name));
@@ -64,38 +66,42 @@ Status UsbMscDevice::init(XhciController* ctrl,
     str::uintToStr(deviceIndex, idxStr, 10, 0);
     str::concat(m_name, idxStr, sizeof(m_name));
 
-    // Allocate 4 KiB physical DMA page for CBW, Data Stage, and CSW
-    // Layout within page:
-    //   [0x000 .. 0x03F]: 31-byte CBW (64-byte aligned)
-    //   [0x040 .. 0x07F]: 13-byte CSW (64-byte aligned)
-    //   [0x200 .. 0xFFF]: Data transfer buffer (up to 3584 bytes, or full sector 512..2048 B)
-    // Wait: to support 4096-byte logical blocks cleanly, let's allocate 2 pages:
+    // Allocate 2 physical DMA pages:
     //   Page 0: CBW + CSW control wrappers
-    //   Page 1: Full 4096-byte sector data bounce buffer
+    //   Page 1: Sector data bounce buffer
     auto dmaRes = pmm->allocPages(2);
-    if (dmaRes.isError()) return dmaRes.status();
+    if (dmaRes.isError()) {
+        m_active = false;
+        return dmaRes.status();
+    }
     m_dmaPagePhys = dmaRes.value();
     m_dmaPageVirt = reinterpret_cast<u8*>(m_dmaPagePhys + hhdmOffset);
     memset(m_dmaPageVirt, 0, PAGE_SIZE_4K * 2);
 
+    // Allow drive microcontroller / flash translation layer 100ms to settle
+    arch::ApicController::instance().sleepMs(100);
+
     // Step 1: SCSI INQUIRY (0x12)
     Status st = scsiInquiry();
     if (st != Status::Ok) {
-        pr_warn("usb-msc", "/dev/%s: SCSI INQUIRY failed", m_name);
+        pr_dbg("usb-msc", "/dev/%s: SCSI INQUIRY failed", m_name);
+        deinit();
         return st;
     }
 
     // Step 2: Poll SCSI TEST UNIT READY (0x00) + REQUEST SENSE (0x03) until flash media is ready
     st = scsiWaitReady();
     if (st != Status::Ok) {
-        pr_warn("usb-msc", "/dev/%s: USB Mass Storage media did not become ready", m_name);
+        pr_dbg("usb-msc", "/dev/%s: USB Mass Storage media did not become ready", m_name);
+        deinit();
         return st;
     }
 
     // Step 3: SCSI READ CAPACITY (10)/(16)
     st = scsiReadCapacity();
     if (st != Status::Ok) {
-        pr_warn("usb-msc", "/dev/%s: SCSI READ CAPACITY failed", m_name);
+        pr_dbg("usb-msc", "/dev/%s: SCSI READ CAPACITY failed", m_name);
+        deinit();
         return st;
     }
 
@@ -103,9 +109,57 @@ Status UsbMscDevice::init(XhciController* ctrl,
     DeviceRegistry::instance().registerBlockDevice(this);
 
     u64 sizeMiB = (m_blockCount * m_blockSize) / (1024ULL * 1024ULL);
-    pr_ok("usb-msc", "Registered /dev/%s: '%s %s' (%s) — %llu blocks x %u B (%llu MiB)",
+    pr_dbg("usb-msc", "Registered /dev/%s: '%s %s' (%s) — %llu blocks x %u B (%llu MiB)",
           m_name, m_vendorStr, m_productStr, m_revisionStr,
           m_blockCount, m_blockSize, sizeMiB);
+
+    return Status::Ok;
+}
+
+void UsbMscDevice::deinit() noexcept {
+    if (m_ready) {
+        DeviceRegistry::instance().unregisterBlockDevice(this);
+        m_ready = false;
+    }
+    m_active = false;
+
+    if (m_dmaPagePhys && m_pmm) {
+        m_pmm->freePages(m_dmaPagePhys, 2);
+        m_dmaPagePhys = 0;
+        m_dmaPageVirt = nullptr;
+    }
+    m_bulkInRing.reset();
+    m_bulkOutRing.reset();
+
+    m_ctrl          = nullptr;
+    m_slotId        = 0;
+    m_portNum       = 0;
+    m_speedId       = 0;
+    m_name[0]       = '\0';
+    m_vendorStr[0]  = '\0';
+    m_productStr[0] = '\0';
+}
+
+Status UsbMscDevice::botResetRecovery() noexcept {
+    if (!m_ctrl || m_slotId == 0) return Status::InvalidArgument;
+
+    // 1. Issue Class-Specific Control Request: Bulk-Only Mass Storage Reset (BOT §3.1)
+    UsbSetupPacket botReset{};
+    botReset.bmRequestType = 0x21U; // Host-to-Device | Class | Interface
+    botReset.bRequest      = USB_REQ_MSC_RESET; // 0xFF
+    botReset.wValue        = 0;
+    botReset.wIndex        = m_interfaceNum;
+    botReset.wLength       = 0;
+
+    (void)m_ctrl->controlTransfer(m_slotId, botReset, nullptr, 0, false);
+    arch::ApicController::instance().sleepMs(10);
+
+    // 2. Clear Halt on Bulk IN endpoint
+    (void)m_ctrl->clearEndpointStall(m_slotId, m_bulkInDci, m_bulkInEpAddr, m_bulkInRing);
+
+    // 3. Clear Halt on Bulk OUT endpoint
+    (void)m_ctrl->clearEndpointStall(m_slotId, m_bulkOutDci, m_bulkOutEpAddr, m_bulkOutRing);
+    arch::ApicController::instance().sleepMs(10);
 
     return Status::Ok;
 }
@@ -115,7 +169,10 @@ Status UsbMscDevice::executeScsiCommand(const u8* cdb,
                                         void* dataBuffer,
                                         u32 dataLength,
                                         bool isDataIn) noexcept {
-    if (!m_ctrl || !cdb || cdbLen == 0 || cdbLen > 16 || dataLength > PAGE_SIZE_4K) {
+    if (!m_active || !m_ctrl) {
+        return Status::DeviceNotFound;
+    }
+    if (!cdb || cdbLen == 0 || cdbLen > 16 || dataLength > PAGE_SIZE_4K) {
         return Status::InvalidArgument;
     }
 
@@ -187,6 +244,16 @@ Status UsbMscDevice::executeScsiCommand(const u8* cdb,
     }
 
     if (cswVirt->signature != USB_MSC_CSW_SIGNATURE || cswVirt->tag != tag) {
+        pr_dbg("usb-msc", "/dev/%s: Invalid CSW (sig=0x%08x, expected 0x%08x; tag=%u, expected %u); issuing BOT Reset Recovery",
+               m_name, cswVirt->signature, USB_MSC_CSW_SIGNATURE, cswVirt->tag, tag);
+        (void)botResetRecovery();
+        return Status::IoError;
+    }
+
+    if (cswVirt->status == 0x02U) {
+        // USB MSC BOT §6.7.2: Phase Error
+        pr_dbg("usb-msc", "/dev/%s: SCSI Phase Error reported by device; issuing BOT Reset Recovery", m_name);
+        (void)botResetRecovery();
         return Status::IoError;
     }
 
@@ -203,7 +270,16 @@ Status UsbMscDevice::scsiInquiry() noexcept {
     cdb[4] = sizeof(ScsiInquiryData); // Allocation Length = 36 bytes
 
     ScsiInquiryData inq{};
-    Status st = executeScsiCommand(cdb, sizeof(cdb), &inq, sizeof(inq), true);
+    Status st = Status::IoError;
+    for (u32 attempt = 0; attempt < 5; ++attempt) {
+        if (attempt > 0) {
+            (void)botResetRecovery();
+            arch::ApicController::instance().sleepMs(100);
+        }
+        memset(&inq, 0, sizeof(inq));
+        st = executeScsiCommand(cdb, sizeof(cdb), &inq, sizeof(inq), true);
+        if (st == Status::Ok) break;
+    }
     if (st != Status::Ok) return st;
 
     copyTrimmedScsiAscii(m_vendorStr, inq.vendorId, sizeof(inq.vendorId));
@@ -228,12 +304,16 @@ Status UsbMscDevice::scsiWaitReady() noexcept {
     u8 turCdb[6]{};
     turCdb[0] = SCSI_CMD_TEST_UNIT_READY;
 
-    for (u32 attempt = 0; attempt < 10; ++attempt) {
+    for (u32 attempt = 0; attempt < 80; ++attempt) {
         if (executeScsiCommand(turCdb, sizeof(turCdb), nullptr, 0, false) == Status::Ok) {
             return Status::Ok;
         }
         // Clear UNIT ATTENTION / NOT READY sense condition and wait 50 ms
         (void)scsiRequestSense();
+        if (attempt > 0 && (attempt % 20) == 0) {
+            pr_dbg("usb-msc", "/dev/%s: Waiting for storage media to become ready... (attempt %u/80)",
+                    m_name, attempt + 1);
+        }
         arch::ApicController::instance().sleepMs(50);
     }
     return Status::Timeout;
@@ -244,13 +324,16 @@ Status UsbMscDevice::scsiReadCapacity() noexcept {
     cdb10[0] = SCSI_CMD_READ_CAPACITY10;
 
     u32 cap10[2]{};
-    Status st = executeScsiCommand(cdb10, sizeof(cdb10), cap10, sizeof(cap10), true);
-    if (st != Status::Ok) {
-        // Retry once after clearing any residual sense
-        (void)scsiRequestSense();
+    Status st = Status::IoError;
+    for (u32 attempt = 0; attempt < 5; ++attempt) {
+        if (attempt > 0) {
+            (void)scsiRequestSense();
+            arch::ApicController::instance().sleepMs(50);
+        }
         st = executeScsiCommand(cdb10, sizeof(cdb10), cap10, sizeof(cap10), true);
-        if (st != Status::Ok) return st;
+        if (st == Status::Ok) break;
     }
+    if (st != Status::Ok) return st;
 
     u32 lastLba32 = bswap32(cap10[0]);
     u32 blkSize   = bswap32(cap10[1]);
@@ -279,11 +362,11 @@ Status UsbMscDevice::scsiReadCapacity() noexcept {
 
 Status UsbMscDevice::rwChunkBlocks(u64 lba, u32 blockCount, void* buffer, bool isWrite) noexcept {
     u32 transferBytes = blockCount * m_blockSize;
-    if (!m_ready || !buffer || blockCount == 0 || transferBytes > PAGE_SIZE_4K) {
-        return Status::InvalidArgument;
+    if (!m_ready || !m_active || !buffer || blockCount == 0 || transferBytes > PAGE_SIZE_4K) {
+        return Status::DeviceNotFound;
     }
 
-    IrqLockGuard guard(m_lock);
+    LockGuard guard(m_lock);
 
     u8 cdb[16]{};
     u8 cdbLen = 10;
@@ -309,12 +392,15 @@ Status UsbMscDevice::rwChunkBlocks(u64 lba, u32 blockCount, void* buffer, bool i
         // Clear any transient UNIT ATTENTION sense condition and retry once
         (void)scsiRequestSense();
         st = executeScsiCommand(cdb, cdbLen, buffer, transferBytes, !isWrite);
+        if (st != Status::Ok) {
+            (void)botResetRecovery();
+        }
     }
     return st;
 }
 
 Status UsbMscDevice::readBlocks(u64 lba, u32 count, void* buffer) {
-    if (!m_ready || !buffer) return Status::InvalidArgument;
+    if (!m_ready || !m_active || !buffer) return Status::DeviceNotFound;
     if (count == 0) return Status::Ok;
     if (lba + count > m_blockCount) return Status::InvalidArgument;
 
@@ -335,7 +421,7 @@ Status UsbMscDevice::readBlocks(u64 lba, u32 count, void* buffer) {
 }
 
 Status UsbMscDevice::writeBlocks(u64 lba, u32 count, const void* buffer) {
-    if (!m_ready || !buffer) return Status::InvalidArgument;
+    if (!m_ready || !m_active || !buffer) return Status::DeviceNotFound;
     if (count == 0) return Status::Ok;
     if (lba + count > m_blockCount) return Status::InvalidArgument;
 
@@ -359,7 +445,7 @@ Status UsbMscDevice::writeBlocks(u64 lba, u32 count, const void* buffer) {
 }
 
 Status UsbMscDevice::flush() {
-    if (!m_ready) return Status::DeviceNotFound;
+    if (!m_ready || !m_active) return Status::DeviceNotFound;
     // USB BOT WRITE(10)/WRITE(16) transfers are synchronous uncached block writes;
     // skipping SCSI SYNCHRONIZE CACHE (0x35) avoids firmware hangs on USB flash drives.
     return Status::Ok;

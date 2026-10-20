@@ -113,4 +113,20 @@ public:
     Status      execute(const CommandArgs& args) override;
 };
 
+class MountCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "mount"; }
+    const char* getUsage() const noexcept override { return "mount [bdev] [mountpoint]"; }
+    const char* getDescription() const noexcept override { return "Mount a block device or list active mounts"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
+class UmountCommand final : public IShellCommand {
+public:
+    const char* getName() const noexcept override { return "umount"; }
+    const char* getUsage() const noexcept override { return "umount <mountpoint>"; }
+    const char* getDescription() const noexcept override { return "Unmount a mounted filesystem"; }
+    Status      execute(const CommandArgs& args) override;
+};
+
 } // namespace cortez::shell::commands

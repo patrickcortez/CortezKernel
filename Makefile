@@ -92,6 +92,7 @@ CPP_SRCS := \
     src/drivers/video/gop_framebuffer.cpp \
     src/drivers/video/terminal_driver.cpp \
     src/drivers/input/ps2_keyboard.cpp \
+    src/drivers/input/input_manager.cpp \
     src/drivers/storage/nvme_queue.cpp \
     src/drivers/storage/nvme_controller.cpp \
     src/drivers/storage/ahci_port.cpp \
@@ -99,11 +100,17 @@ CPP_SRCS := \
     src/drivers/storage/ahci_controller.cpp \
     src/drivers/storage/storage_manager.cpp \
     src/drivers/storage/gpt_partition.cpp \
+    src/drivers/storage/mbr_partition.cpp \
+    src/drivers/storage/os_installer.cpp \
+    src/drivers/usb/usb_port.cpp \
+    src/drivers/usb/usb_keyboard_device.cpp \
     src/drivers/usb/xhci_rings.cpp \
     src/drivers/usb/xhci_controller.cpp \
     src/drivers/usb/usb_msc_device.cpp \
+    src/fs/fs_detector.cpp \
     src/fs/path_resolver.cpp \
     src/fs/fd_table.cpp \
+    src/fs/fat/fat32_fs.cpp \
     src/fs/exfat/exfat_fs.cpp \
     src/fs/vfs_manager.cpp \
     src/proc/scheduler.cpp \
@@ -126,7 +133,7 @@ CPP_OBJS := $(patsubst src/%.cpp,$(BUILD_DIR)/%.cpp.o,$(CPP_SRCS))
 TCC_OBJS := $(patsubst third_party/%.cpp,$(BUILD_DIR)/third_party/%.cpp.o,$(TCC_SRCS))
 ALL_OBJS := $(ASM_OBJS) $(CPP_OBJS) $(TCC_OBJS)
 
-.PHONY: all image run run-sata run-dual run-usb clean
+.PHONY: all image run run-sata run-dual run-usb run-usb-kbd run-usb-all clean
 
 all: image
 
@@ -179,6 +186,23 @@ run-usb: image
 	    -drive file=$(DISK_IMAGE),if=none,id=usbdisk,format=raw \
 	    -device usb-storage,bus=xhci.0,drive=usbdisk,serial=CORTEZUSB2026 \
 	    -serial stdio
+
+run-usb-kbd: image
+	$(QEMU) -machine q35 -m 512M -bios $(OVMF) \
+	    -device qemu-xhci,id=xhci \
+	    -device usb-kbd,bus=xhci.0,id=kbd0 \
+	    -drive file=$(DISK_IMAGE),if=none,id=nvm,format=raw \
+	    -device pcie-root-port,id=rp1,slot=0,chassis=1 \
+	    -device nvme,bus=rp1,drive=nvm,serial=CORTEZ2026 \
+	    -serial stdio
+
+run-usb-all: image
+	$(QEMU) -machine q35 -m 512M -bios $(OVMF) \
+	    -device qemu-xhci,id=xhci \
+	    -device usb-kbd,bus=xhci.0,id=kbd0 \
+	    -drive file=$(DISK_IMAGE),if=none,id=usbdisk,format=raw \
+	    -device usb-storage,bus=xhci.0,drive=usbdisk,serial=CORTEZUSB2026 \
+	    -serial stdio -monitor telnet:127.0.0.1:4444,server,nowait
 
 clean:
 	@$(PYTHON) -c "import shutil; shutil.rmtree('$(BUILD_DIR)', ignore_errors=True)"

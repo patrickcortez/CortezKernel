@@ -8,8 +8,11 @@
 #include "xhci_regs.hpp"
 #include "../../memory/i_memory.hpp"
 #include "../../lib/result.hpp"
+#include "../../lib/spinlock.hpp"
 
 namespace cortez::drivers::usb {
+
+class XhciController;
 
 /**
  * @brief Encapsulates a 256-entry (4 KiB page) Producer TRB Ring with Link TRB wrap-around.
@@ -60,13 +63,25 @@ public:
     Status pollEvent(u8 expectedType, XhciTrb* outEvent, u32 timeoutMs = 5000) noexcept;
 
     /**
+     * @brief Central synchronized event dispatcher: routes events to matching waiters,
+     *        dispatches keyboard transfer events, and handles port status changes.
+     */
+    void dispatchEvents(XhciController* ctrl) noexcept;
+
+    /**
      * @brief Drains any pending asynchronous events (e.g. Port Status Change Events after reset).
      */
     void drainEvents() noexcept;
 
+    /**
+     * @brief Non-blocking event processor dispatching Transfer Events and Port Status Change Events.
+     */
+    void processEvents(XhciController* ctrl) noexcept;
+
 private:
     void updateErdp() noexcept;
 
+    Spinlock               m_lock{};
     volatile u8*           m_ir0Virt    = nullptr;
     phys_addr_t            m_trbsPhys   = 0;
     phys_addr_t            m_erstPhys   = 0;

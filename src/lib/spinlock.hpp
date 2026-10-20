@@ -48,6 +48,26 @@ private:
 };
 
 /**
+ * @brief Standard RAII lock guard for Spinlock (does not disable interrupts).
+ */
+class LockGuard final {
+public:
+    explicit LockGuard(Spinlock& lock) noexcept : m_lock(lock) {
+        m_lock.lock();
+    }
+
+    ~LockGuard() noexcept {
+        m_lock.unlock();
+    }
+
+    LockGuard(const LockGuard&) = delete;
+    LockGuard& operator=(const LockGuard&) = delete;
+
+private:
+    Spinlock& m_lock;
+};
+
+/**
  * @brief RAII guard that disables local CPU interrupts and acquires a Spinlock.
  */
 class IrqLockGuard final {
@@ -68,3 +88,4 @@ private:
 };
 
 } // namespace cortez
+

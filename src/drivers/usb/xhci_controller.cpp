@@ -5,9 +5,15 @@
  */
 
 #include "xhci_controller.hpp"
+#include "usb_port.hpp"
+#include "usb_keyboard_device.hpp"
+#include "../input/input_manager.hpp"
+#include "../storage/storage_manager.hpp"
 #include "../storage/gpt_partition.hpp"
+#include "../storage/mbr_partition.hpp"
 #include "../../arch/x86_64/apic.hpp"
 #include "../../arch/x86_64/cpu.hpp"
+#include "../../klibc/klibc.hpp"
 #include "../../lib/string_utils.hpp"
 #include "../../lib/printk.hpp"
 
@@ -48,6 +54,16 @@ u32 XhciController::readPortsc(u8 portNum) const noexcept {
 void XhciController::writePortsc(u8 portNum, u32 value) noexcept {
     u32 offset = XHCI_OP_PORTS + static_cast<u32>(portNum - 1U) * 0x10U;
     writeOp32(offset, value);
+}
+
+void XhciController::safeWritePortsc(u8 portNum, u32 setBits, u32 clearChangeBits) noexcept {
+    u32 current = readPortsc(portNum);
+    // Always preserve Port Power (PP = bit 9).
+    // Clear PLS field (bits 5..8) and mask out RW1C bits so uncommanded state transitions are prevented.
+    u32 val = (current & ~XHCI_PORTSC_RW1C_MASK & ~XHCI_PORTSC_PLS_MASK) | XHCI_PORTSC_PP;
+    val |= setBits;
+    val |= (clearChangeBits & XHCI_PORTSC_CHANGE_BITS);
+    writePortsc(portNum, val);
 }
 
 void XhciController::ringDoorbell(u8 slotId, u32 target) noexcept {
@@ -125,7 +141,7 @@ void XhciController::performBiosHandoff() noexcept {
             legCtlSts |=  ((1U << 16) | (1U << 20) | (1U << 29) | (1U << 30) | (1U << 31));
             *reinterpret_cast<volatile u32*>(m_capBaseVirt + offset + 4) = legCtlSts;
 
-            pr_info("xhci", "Completed BIOS/UEFI-to-OS xHCI handoff (USBLEGSUP @ +0x%x)", offset);
+            pr_dbg("xhci", "Completed BIOS/UEFI-to-OS xHCI handoff (USBLEGSUP @ +0x%x)", offset);
             break;
         }
 
@@ -144,6 +160,78 @@ void XhciController::enableIntelPortRouting() noexcept {
         u32 usb2Mask = pcie.readConfig32(m_pciDev.bus, m_pciDev.device, m_pciDev.function, 0xD4);
         pcie.writeConfig32(m_pciDev.bus, m_pciDev.device, m_pciDev.function, 0xD0, usb2Mask);
     }
+}
+
+void XhciController::parseSupportedProtocols() noexcept {
+    m_protocolCount = 0;
+    u32 hcc1 = readCap32(XHCI_CAP_HCCPARAMS1);
+    u32 xecp = (hcc1 >> 16) & 0xFFFFU;
+    if (xecp == 0) return;
+
+    u32 offset = xecp << 2;
+    for (u32 guard = 0; offset != 0 && offset + 12 <= 131072U && guard < 64; ++guard) {
+        u32 capHdr  = readCap32(offset);
+        u8  capId   = static_cast<u8>(capHdr & 0xFFU);
+        u8  nextPtr = static_cast<u8>((capHdr >> 8) & 0xFFU);
+
+        if (capId == XHCI_EXT_CAP_PROTO && m_protocolCount < MAX_PROTOCOLS) {
+            u8 minorRev = static_cast<u8>((capHdr >> 16) & 0xFFU);
+            u8 majorRev = static_cast<u8>((capHdr >> 24) & 0xFFU);
+            u32 dw2     = readCap32(offset + 8);
+            u8  pOffset = static_cast<u8>(dw2 & 0xFFU);
+            u8  pCount  = static_cast<u8>((dw2 >> 8) & 0xFFU);
+
+            if (pOffset >= 1 && pCount > 0) {
+                m_protocols[m_protocolCount++] = XhciProtocolRange{majorRev, minorRev, pOffset, pCount};
+                pr_dbg("xhci", "[usb-bus %u] Supported Protocol USB %u.%02x: Ports %u..%u (count %u)",
+                        m_busIndex, majorRev, minorRev, pOffset, pOffset + pCount - 1, pCount);
+            }
+        }
+
+        if (nextPtr == 0) break;
+        offset += static_cast<u32>(nextPtr) << 2;
+    }
+}
+
+bool XhciController::isPortValid(u8 portNum, u8* outMajor, u8* outMinor) const noexcept {
+    if (m_protocolCount == 0) {
+        if (portNum >= 1 && portNum <= m_maxPorts) {
+            if (outMajor) *outMajor = 2;
+            if (outMinor) *outMinor = 0;
+            return true;
+        }
+        return false;
+    }
+    for (usize i = 0; i < m_protocolCount; ++i) {
+        const auto& p = m_protocols[i];
+        if (portNum >= p.portOffset && portNum < (p.portOffset + p.portCount)) {
+            if (outMajor) *outMajor = p.majorRev;
+            if (outMinor) *outMinor = p.minorRev;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool XhciController::debouncePort(u8 portNum, bool expectedCcs) noexcept {
+    u32 stableMs = 0;
+    constexpr u32 STEP_MS = 25;
+    constexpr u32 STABLE_REQUIRED_MS = 100;
+    constexpr u32 MAX_WAIT_MS = 400;
+
+    for (u32 elapsed = 0; elapsed < MAX_WAIT_MS; elapsed += STEP_MS) {
+        arch::ApicController::instance().sleepMs(STEP_MS);
+        bool currentCcs = (readPortsc(portNum) & XHCI_PORTSC_CCS) != 0;
+        if (currentCcs == expectedCcs) {
+            stableMs += STEP_MS;
+            if (stableMs >= STABLE_REQUIRED_MS) {
+                return true;
+            }
+        } else {
+            stableMs = 0;
+        }
+    }
+    return ((readPortsc(portNum) & XHCI_PORTSC_CCS) != 0) == expectedCcs;
 }
 
 // =============================================================================
@@ -191,6 +279,7 @@ Status XhciController::setupDcbaaAndScratchpad() noexcept {
 }
 
 Status XhciController::init(const arch::PciDeviceInfo& pciDev,
+                            u8 busIndex,
                             memory::IPhysicalAllocator* pmm,
                             memory::IVirtualMapper* vmm,
                             u64 hhdmOffset) noexcept {
@@ -199,12 +288,13 @@ Status XhciController::init(const arch::PciDeviceInfo& pciDev,
     }
 
     m_pciDev     = pciDev;
+    m_busIndex   = busIndex;
     m_pmm        = pmm;
     m_vmm        = vmm;
     m_hhdmOffset = hhdmOffset;
 
-    pr_info("xhci", "Found PCIe xHCI controller at %02x:%02x.%u [VID:DID %04x:%04x] BAR0=0x%llx",
-            pciDev.bus, pciDev.device, pciDev.function,
+    pr_dbg("xhci", "[usb-bus %u] Found PCIe xHCI controller at %02x:%02x.%u [VID:DID %04x:%04x] BAR0=0x%llx",
+            m_busIndex, pciDev.bus, pciDev.device, pciDev.function,
             pciDev.vendorId, pciDev.deviceId, pciDev.bar0Phys);
 
     arch::PcieManager::instance().enableBusMastering(pciDev);
@@ -254,20 +344,23 @@ Status XhciController::init(const arch::PciDeviceInfo& pciDev,
     // Step 1: Perform BIOS/UEFI Legacy Ownership Handoff
     performBiosHandoff();
 
+    // Step 1b: Parse Supported Protocol Extended Capabilities (§7.2)
+    parseSupportedProtocols();
+
     // Step 2: Halt controller before reset (USBCMD.RS = 0 -> wait for USBSTS.HCH = 1)
     u32 cmd = readOp32(XHCI_OP_USBCMD);
     if (cmd & XHCI_CMD_RS) {
         writeOp32(XHCI_OP_USBCMD, cmd & ~XHCI_CMD_RS);
     }
     if (!waitOpBit(XHCI_OP_USBSTS, XHCI_STS_HCH, XHCI_STS_HCH, 500)) {
-        pr_warn("xhci", "Controller did not report HCH=1 before reset; proceeding with HCRST");
+        pr_dbg("xhci", "Controller did not report HCH=1 before reset; proceeding with HCRST");
     }
 
     // Step 3: Issue Host Controller Reset (USBCMD.HCRST = 1) and wait for HCRST=0 and CNR=0
     writeOp32(XHCI_OP_USBCMD, XHCI_CMD_HCRST);
     if (!waitOpBit(XHCI_OP_USBCMD, XHCI_CMD_HCRST, 0, 1000) ||
         !waitOpBit(XHCI_OP_USBSTS, XHCI_STS_CNR, 0, 1000)) {
-        pr_err("xhci", "Timeout waiting for xHCI reset completion");
+        pr_dbg("xhci", "Timeout waiting for xHCI reset completion");
         return Status::Timeout;
     }
     arch::ApicController::instance().sleepMs(10);
@@ -303,30 +396,157 @@ Status XhciController::init(const arch::PciDeviceInfo& pciDev,
     writeOp32(XHCI_OP_USBCMD, XHCI_CMD_RS | XHCI_CMD_INTE | XHCI_CMD_HSEE);
 
     if (!waitOpBit(XHCI_OP_USBSTS, XHCI_STS_HCH, 0, 500)) {
-        pr_err("xhci", "Timeout waiting for xHCI controller to enter Running state (HCH=0)");
+        pr_dbg("xhci", "Timeout waiting for xHCI controller to enter Running state (HCH=0)");
         return Status::Timeout;
     }
 
     m_ready = true;
-    pr_ok("xhci", "xHCI %x.%02x ready: %u ports, %u slots, %zuB contexts",
-          (m_hciVersion >> 8) & 0xFFU, m_hciVersion & 0xFFU,
+    pr_dbg("xhci", "[usb-bus %u] xHCI %x.%02x ready: %u ports, %u slots, %zuB contexts",
+          m_busIndex, (m_hciVersion >> 8) & 0xFFU, m_hciVersion & 0xFFU,
           m_maxPorts, m_maxSlots, m_contextSize);
+
+    // Register only verified physical ports discovered from Supported Protocol capabilities
+    for (u8 port = 1; port <= m_maxPorts && port <= MAX_PORTS_PER_CTRL; ++port) {
+        u8 major = 2, minor = 0;
+        if (isPortValid(port, &major, &minor)) {
+            m_ports[port - 1].init(this, m_busIndex, port, major, minor);
+            (void)UsbPortManager::instance().registerPort(&m_ports[port - 1]);
+        }
+    }
+
+    // Set up peer port mappings between USB 2.0 and USB 3.x ports sharing physical connectors
+    const XhciProtocolRange* proto2 = nullptr;
+    const XhciProtocolRange* proto3 = nullptr;
+    for (usize i = 0; i < m_protocolCount; ++i) {
+        if (m_protocols[i].majorRev == 2 && !proto2) proto2 = &m_protocols[i];
+        if (m_protocols[i].majorRev == 3 && !proto3) proto3 = &m_protocols[i];
+    }
+    if (proto2 && proto3) {
+        u8 pairCount = (proto2->portCount < proto3->portCount) ? proto2->portCount : proto3->portCount;
+        for (u8 p = 0; p < pairCount; ++p) {
+            u8 p2 = proto2->portOffset + p;
+            u8 p3 = proto3->portOffset + p;
+            if (p2 <= MAX_PORTS_PER_CTRL && p3 <= MAX_PORTS_PER_CTRL) {
+                m_ports[p2 - 1].setPeerPortNum(p3);
+                m_ports[p3 - 1].setPeerPortNum(p2);
+            }
+        }
+    }
 
     // Step 9: Power and probe all root hub ports
     probePorts();
     return Status::Ok;
 }
 
+UsbPort* XhciController::getUsbPort(u8 portNum) noexcept {
+    if (portNum >= 1 && portNum <= m_maxPorts && portNum <= MAX_PORTS_PER_CTRL) {
+        return &m_ports[portNum - 1];
+    }
+    return nullptr;
+}
+
 // =============================================================================
 // Command Submission, Control Transfers & Bulk Transfers
 // =============================================================================
 
+bool XhciController::dispatchToWaiters(const XhciTrb& trb) noexcept {
+    IrqLockGuard guard(m_waiterLock);
+    u8          type    = trb.getType();
+    u8          slotId  = trb.getSlotId();
+    u8          dci     = trb.getEndpointId();
+    phys_addr_t trbPhys = trb.param;
+
+    for (usize i = 0; i < MAX_WAITERS; ++i) {
+        auto* w = m_waiters[i];
+        if (!w || w->completed) continue;
+        if (w->expectedType != type) continue;
+
+        if (type == XHCI_TRB_CMD_COMPLETION) {
+            if (w->trbPhys == 0 || w->trbPhys == trbPhys) {
+                w->capturedTrb = trb;
+                w->completed   = true;
+                return true;
+            }
+        } else if (type == XHCI_TRB_TRANSFER_EVENT) {
+            if ((w->slotId == 0 || w->slotId == slotId) &&
+                (w->dci == 0 || w->dci == dci) &&
+                (w->trbPhys == 0 || w->trbPhys == trbPhys)) {
+                w->capturedTrb = trb;
+                w->completed   = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void XhciController::registerWaiter(XhciEventWaiter* w) noexcept {
+    if (!w) return;
+    IrqLockGuard guard(m_waiterLock);
+    for (usize i = 0; i < MAX_WAITERS; ++i) {
+        if (!m_waiters[i]) {
+            m_waiters[i] = w;
+            return;
+        }
+    }
+}
+
+void XhciController::unregisterWaiter(XhciEventWaiter* w) noexcept {
+    if (!w) return;
+    IrqLockGuard guard(m_waiterLock);
+    for (usize i = 0; i < MAX_WAITERS; ++i) {
+        if (m_waiters[i] == w) {
+            m_waiters[i] = nullptr;
+            return;
+        }
+    }
+}
+
+Status XhciController::waitForEvent(XhciEventWaiter* waiter, u32 timeoutMs) noexcept {
+    if (!waiter) return Status::InvalidArgument;
+    u64 startMs = arch::ApicController::instance().getUptimeMs();
+    u32 spinGuard = 0;
+    u32 maxSpins  = timeoutMs * 40000U;
+
+    while (!waiter->completed) {
+        m_eventRing.dispatchEvents(this);
+        if (waiter->completed) break;
+
+        arch::pause();
+        ++spinGuard;
+        u64 nowMs = arch::ApicController::instance().getUptimeMs();
+        if ((nowMs > startMs && (nowMs - startMs) >= timeoutMs) || spinGuard > maxSpins) {
+            return Status::Timeout;
+        }
+    }
+
+    u8 cc = waiter->capturedTrb.getCompletionCode();
+    if (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET) {
+        return Status::Ok;
+    }
+    return Status::IoError;
+}
+
 Status XhciController::submitCommand(const XhciTrb& cmdTrb,
                                      XhciTrb* outCompletion,
                                      u32 timeoutMs) noexcept {
-    m_cmdRing.enqueue(cmdTrb);
+    IrqLockGuard guard(m_cmdLock);
+    XhciEventWaiter waiter{};
+    waiter.expectedType = XHCI_TRB_CMD_COMPLETION;
+
+    phys_addr_t cmdPhys = m_cmdRing.enqueue(cmdTrb);
+    waiter.trbPhys      = cmdPhys;
+
+    registerWaiter(&waiter);
     ringDoorbell(0, 0); // Doorbell 0, Target 0 = Host Controller Command Ring
-    return m_eventRing.pollEvent(XHCI_TRB_CMD_COMPLETION, outCompletion, timeoutMs);
+
+    Status st = waitForEvent(&waiter, timeoutMs);
+    unregisterWaiter(&waiter);
+
+    if (outCompletion) {
+        *outCompletion = waiter.capturedTrb;
+    }
+    return st;
 }
 
 Status XhciController::controlTransfer(u8 slotId,
@@ -385,13 +605,21 @@ Status XhciController::controlTransfer(u8 slotId,
     statusTrb.control = (static_cast<u32>(XHCI_TRB_STATUS_STAGE) << 10) |
                         XHCI_TRB_IOC |
                         (statusDirIn ? XHCI_TRB_DIR_IN : 0U);
-    slot.ep0Ring.enqueue(statusTrb);
 
+    XhciEventWaiter waiter{};
+    waiter.expectedType = XHCI_TRB_TRANSFER_EVENT;
+    waiter.slotId       = slotId;
+    waiter.dci          = 1;
+    phys_addr_t statusPhys = slot.ep0Ring.enqueue(statusTrb);
+    waiter.trbPhys      = statusPhys;
+
+    registerWaiter(&waiter);
     // Ring Doorbell for Slot (Target = 1 for Control Endpoint 0)
     ringDoorbell(slotId, 1U);
 
-    XhciTrb ev{};
-    Status st = m_eventRing.pollEvent(XHCI_TRB_TRANSFER_EVENT, &ev, 3000);
+    Status st = waitForEvent(&waiter, 3000);
+    unregisterWaiter(&waiter);
+
     if (st != Status::Ok) {
         return st;
     }
@@ -447,7 +675,8 @@ Status XhciController::bulkTransfer(u8 slotId,
                                     XhciTrbRing& ring,
                                     phys_addr_t dmaPhys,
                                     u32 length,
-                                    bool isDataIn) noexcept {
+                                    bool isDataIn,
+                                    u32* outActualLength) noexcept {
     if (slotId == 0 || slotId >= MAX_SLOTS_PER_CTRL || !m_slots[slotId].active) {
         return Status::InvalidArgument;
     }
@@ -459,20 +688,32 @@ Status XhciController::bulkTransfer(u8 slotId,
                       XHCI_TRB_IOC |
                       (isDataIn ? XHCI_TRB_ISP : 0U);
 
-    ring.enqueue(xferTrb);
+    XhciEventWaiter waiter{};
+    waiter.expectedType = XHCI_TRB_TRANSFER_EVENT;
+    waiter.slotId       = slotId;
+    waiter.dci          = dci;
+
+    phys_addr_t trbPhys = ring.enqueue(xferTrb);
+    waiter.trbPhys      = trbPhys;
+
+    registerWaiter(&waiter);
     ringDoorbell(slotId, dci);
 
-    XhciTrb ev{};
-    Status st = m_eventRing.pollEvent(XHCI_TRB_TRANSFER_EVENT, &ev, 5000);
+    Status st = waitForEvent(&waiter, 5000);
+    unregisterWaiter(&waiter);
+
     if (st != Status::Ok) {
-        if (ev.getCompletionCode() == XHCI_CC_STALL_ERROR) {
+        if (waiter.capturedTrb.getCompletionCode() == XHCI_CC_STALL_ERROR) {
             (void)clearEndpointStall(slotId, dci, epAddr, ring);
         }
         return st;
     }
 
-    // If Interrupt on Short Packet (ISP) generated a Transfer Event before an IOC TRB,
-    // Normal TRB has both ISP and IOC on the same single TRB so only one event is generated.
+    if (outActualLength) {
+        u32 residual = waiter.capturedTrb.status & 0x00FFFFFFU;
+        *outActualLength = (length >= residual) ? (length - residual) : length;
+    }
+
     return Status::Ok;
 }
 
@@ -481,41 +722,112 @@ Status XhciController::bulkTransfer(u8 slotId,
 // =============================================================================
 
 void XhciController::probePorts() noexcept {
-    // Ensure Port Power (PP) is asserted on all ports
+    // Ensure Port Power (PP) is asserted on all valid physical ports
     for (u8 port = 1; port <= m_maxPorts; ++port) {
-        u32 portsc = readPortsc(port);
-        if (!(portsc & XHCI_PORTSC_PP)) {
-            writePortsc(port, XHCI_PORTSC_PP);
-        }
+        if (!isPortValid(port)) continue;
+        safeWritePortsc(port, XHCI_PORTSC_PP, 0);
     }
 
-    // Wait 50 ms for port power & USB 3.x / 2.0 link detection to settle
-    arch::ApicController::instance().sleepMs(50);
-    m_eventRing.drainEvents();
+    // Wait 100 ms for port power & USB 3.x / 2.0 link detection to settle
+    arch::ApicController::instance().sleepMs(100);
+    m_eventRing.dispatchEvents(this);
 
+    pr_dbg("xhci", "[usb-bus %u] Scanning valid root hub ports for connected USB devices...", m_busIndex);
+
+    // Pass 1: Probe USB 3.x ports first so SuperSpeed devices bind before companion USB 2.0 lines
     for (u8 port = 1; port <= m_maxPorts; ++port) {
-        u32 portsc = readPortsc(port);
-        if (!(portsc & XHCI_PORTSC_CCS)) {
-            continue;
-        }
+        if (!isPortValid(port)) continue;
+        if (port <= MAX_PORTS_PER_CTRL && !m_ports[port - 1].isUsb3()) continue;
 
+        u32 portsc = readPortsc(port);
+        bool connected = (portsc & XHCI_PORTSC_CCS) != 0;
+        if (port <= MAX_PORTS_PER_CTRL) {
+            m_ports[port - 1].setPhysicallyConnected(connected);
+        }
+        if (!connected) continue;
+
+        pr_dbg("xhci", "[usb-bus %u] Port %u (USB 3.x): Connection detected (PORTSC=0x%08x), probing device...",
+                m_busIndex, port, portsc);
         u8 speedId = 0;
         if (resetPort(port, &speedId)) {
             (void)enumeratePortDevice(port, speedId);
+        } else {
+            pr_dbg("xhci", "[usb-bus %u] Port %u: Failed to reset and enable port", m_busIndex, port);
         }
     }
+
+    // Pass 2: Probe USB 2.0 ports
+    for (u8 port = 1; port <= m_maxPorts; ++port) {
+        if (!isPortValid(port)) continue;
+        if (port <= MAX_PORTS_PER_CTRL && m_ports[port - 1].isUsb3()) continue;
+
+        u32 portsc = readPortsc(port);
+        bool connected = (portsc & XHCI_PORTSC_CCS) != 0;
+        if (port <= MAX_PORTS_PER_CTRL) {
+            m_ports[port - 1].setPhysicallyConnected(connected);
+        }
+        if (!connected) continue;
+
+        // If companion USB 3.x port on the same physical connector already claimed this device, skip USB 2.0 probe
+        if (port <= MAX_PORTS_PER_CTRL) {
+            u8 peer = m_ports[port - 1].getPeerPortNum();
+            if (peer >= 1 && peer <= m_maxPorts) {
+                if (m_ports[peer - 1].hasAttachedDevice()) {
+                    continue;
+                }
+                u32 peerPortsc = readPortsc(peer);
+                u8 peerSpeed = static_cast<u8>((peerPortsc >> 10) & 0x0FU);
+                if ((peerPortsc & XHCI_PORTSC_PED) && peerSpeed >= XHCI_SPEED_SUPER) {
+                    continue;
+                }
+            }
+        }
+
+        pr_dbg("xhci", "[usb-bus %u] Port %u (USB 2.0): Connection detected (PORTSC=0x%08x), probing device...",
+                m_busIndex, port, portsc);
+        u8 speedId = 0;
+        if (resetPort(port, &speedId)) {
+            (void)enumeratePortDevice(port, speedId);
+        } else {
+            pr_dbg("xhci", "[usb-bus %u] Port %u: Failed to reset and enable port", m_busIndex, port);
+        }
+    }
+
+    // Settle port events from initial probe, clear change bits, and drain event ring
+    arch::ApicController::instance().sleepMs(20);
+    for (u8 p = 1; p <= m_maxPorts; ++p) {
+        if (isPortValid(p)) {
+            safeWritePortsc(p, 0, XHCI_PORTSC_CHANGE_BITS);
+        }
+    }
+    m_eventRing.drainEvents();
+    m_pendingPortMask = 0;
+    writeOp32(XHCI_OP_USBSTS, XHCI_STS_PCD | XHCI_STS_EINT);
 }
 
 bool XhciController::resetPort(u8 portNum, u8* outSpeedId) noexcept {
+    u8 major = 2, minor = 0;
+    bool isUsb3Port = isPortValid(portNum, &major, &minor) && (major >= 3);
+
     u32 portsc = readPortsc(portNum);
     if (!(portsc & XHCI_PORTSC_CCS)) return false;
 
-    // Clear any latched status change bits while preserving Port Power
-    writePortsc(portNum, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_CHANGE_BITS);
+    u8 speed = static_cast<u8>((portsc >> 10) & 0x0FU);
+    u32 pls = (portsc & XHCI_PORTSC_PLS_MASK) >> 5;
+
+    // xHCI §4.3.1: For SuperSpeed ports already trained to U0 and enabled, skip redundant reset.
+    if ((portsc & XHCI_PORTSC_PED) && speed >= XHCI_SPEED_SUPER && pls == 0) {
+        safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
+        m_eventRing.dispatchEvents(this);
+        if (outSpeedId) *outSpeedId = speed;
+        return true;
+    }
+
+    // Clear any latched status change bits while preserving Port Power and PLS=0
+    safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
 
     // Assert Port Reset (PR = bit 4)
-    portsc = readPortsc(portNum);
-    writePortsc(portNum, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PR);
+    safeWritePortsc(portNum, XHCI_PORTSC_PR, 0);
 
     bool resetDone = false;
     for (u32 ms = 0; ms < 500; ++ms) {
@@ -528,10 +840,9 @@ bool XhciController::resetPort(u8 portNum, u8* outSpeedId) noexcept {
         }
     }
 
-    // Fallback to Warm Port Reset (WPR) for USB 3.x ports if standard reset didn't enable PED
-    if (!resetDone || !(readPortsc(portNum) & XHCI_PORTSC_PED)) {
-        portsc = readPortsc(portNum);
-        writePortsc(portNum, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_WPR);
+    // Fallback to Warm Port Reset (WPR) ONLY for USB 3.x ports if standard reset didn't enable PED
+    if (isUsb3Port && (!resetDone || !(readPortsc(portNum) & XHCI_PORTSC_PED))) {
+        safeWritePortsc(portNum, XHCI_PORTSC_WPR, 0);
         for (u32 ms = 0; ms < 500; ++ms) {
             arch::ApicController::instance().sleepMs(1);
             portsc = readPortsc(portNum);
@@ -541,25 +852,25 @@ bool XhciController::resetPort(u8 portNum, u8* outSpeedId) noexcept {
         }
     }
 
-    // Clear reset change bits (PRC / WRC / CSC / PEC / PLC)
-    portsc = readPortsc(portNum);
-    writePortsc(portNum, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_CHANGE_BITS);
+    // Clear reset change bits
+    safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
 
-    // Allow 20 ms USB reset recovery (TRSTRCY) and drain Port Status Change Events
+    // Allow 20 ms USB reset recovery (TRSTRCY) and dispatch any concurrent events
     arch::ApicController::instance().sleepMs(20);
-    m_eventRing.drainEvents();
+    m_eventRing.dispatchEvents(this);
 
     portsc = readPortsc(portNum);
     if (!(portsc & XHCI_PORTSC_PED)) {
-        pr_warn("xhci", "Port %u connected (PORTSC=0x%08x) but failed to enable after reset",
-                portNum, portsc);
+        pr_dbg("xhci", "[usb-bus %u] Port %u connected (PORTSC=0x%08x) but failed to enable after reset",
+                m_busIndex, portNum, portsc);
         return false;
     }
 
-    u8 speed = static_cast<u8>((portsc >> 10) & 0x0FU);
+    speed = static_cast<u8>((portsc >> 10) & 0x0FU);
     if (outSpeedId) *outSpeedId = speed;
     return (speed != 0);
 }
+
 
 Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
     // Step 1: Enable Slot Command
@@ -571,13 +882,13 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
     XhciTrb cmdComp{};
     Status st = submitCommand(enableSlotCmd, &cmdComp, 2000);
     if (st != Status::Ok) {
-        pr_err("xhci", "Port %u: Enable Slot command failed", portNum);
+        pr_dbg("xhci", "Port %u: Enable Slot command failed", portNum);
         return st;
     }
 
     u8 slotId = cmdComp.getSlotId();
     if (slotId == 0 || slotId >= MAX_SLOTS_PER_CTRL) {
-        pr_err("xhci", "Port %u: Invalid Slot ID %u returned by controller", portNum, slotId);
+        pr_dbg("xhci", "Port %u: Invalid Slot ID %u returned by controller", portNum, slotId);
         return Status::IoError;
     }
 
@@ -595,9 +906,15 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
     // Step 2: Allocate Output Device Context, Input Context, and EP0 Transfer Ring
     auto outPage = m_pmm->allocPages(1);
-    if (outPage.isError()) return outPage.status();
+    if (outPage.isError()) {
+        teardownSlot(slotId);
+        return outPage.status();
+    }
     auto inPage = m_pmm->allocPages(1);
-    if (inPage.isError()) return inPage.status();
+    if (inPage.isError()) {
+        teardownSlot(slotId);
+        return inPage.status();
+    }
 
     slot.outputCtxPhys = outPage.value();
     slot.outputCtxVirt = reinterpret_cast<u8*>(slot.outputCtxPhys + m_hhdmOffset);
@@ -608,7 +925,10 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
     memset(slot.inputCtxVirt, 0, PAGE_SIZE_4K);
 
     st = slot.ep0Ring.init(m_pmm, m_hhdmOffset);
-    if (st != Status::Ok) return st;
+    if (st != Status::Ok) {
+        teardownSlot(slotId);
+        return st;
+    }
 
     // Populate Input Context for Address Device (A0 = Slot, A1 = EP0)
     auto* icc     = reinterpret_cast<XhciInputControlContext*>(getInputControlCtx(slot));
@@ -642,8 +962,9 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
     st = submitCommand(addrCmd, &cmdComp, 3000);
     if (st != Status::Ok) {
-        pr_warn("xhci", "Port %u (Slot %u): Address Device command failed (CC=%u)",
+        pr_dbg("xhci", "Port %u (Slot %u): Address Device command failed (CC=%u)",
                 portNum, slotId, cmdComp.getCompletionCode());
+        teardownSlot(slotId);
         return st;
     }
 
@@ -661,7 +982,8 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
     st = controlTransfer(slotId, getDevDesc, &devDesc, sizeof(devDesc), true);
     if (st != Status::Ok) {
-        pr_warn("xhci", "Port %u (Slot %u): Failed to read USB Device Descriptor", portNum, slotId);
+        pr_dbg("xhci", "Port %u (Slot %u): Failed to read USB Device Descriptor", portNum, slotId);
+        teardownSlot(slotId);
         return st;
     }
 
@@ -684,7 +1006,7 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
         (void)submitCommand(evalCmd, &cmdComp, 1000);
     }
 
-    pr_info("xhci", "Port %u (Slot %u, %s): USB Device [VID:PID %04x:%04x] Class %02x:%02x",
+    pr_dbg("xhci", "Port %u (Slot %u, %s): USB Device [VID:PID %04x:%04x] Class %02x:%02x",
             portNum, slotId, XhciManager::speedToString(speedId),
             devDesc.idVendor, devDesc.idProduct,
             devDesc.bDeviceClass, devDesc.bDeviceSubClass);
@@ -700,6 +1022,7 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
     st = controlTransfer(slotId, getCfgHdr, &cfgHdr, sizeof(cfgHdr), true);
     if (st != Status::Ok || cfgHdr.wTotalLength < sizeof(UsbConfigDescriptor)) {
+        teardownSlot(slotId);
         return Status::IoError;
     }
 
@@ -709,12 +1032,25 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
     u8 cfgBuf[1024]{};
     getCfgHdr.wLength = totalCfgLen;
     st = controlTransfer(slotId, getCfgHdr, cfgBuf, totalCfgLen, true);
-    if (st != Status::Ok) return st;
+    if (st != Status::Ok) {
+        teardownSlot(slotId);
+        return st;
+    }
 
-    // Step 6: Parse descriptors for a USB Mass Storage Bulk-Only Transport (BOT) Interface
+    // Step 6: Parse descriptors and classify USB device (keyboard, mouse, audio, hub, video, storage)
+    bool isAudioDev = (devDesc.bDeviceClass == 0x01U);
+    bool isHubDev   = (devDesc.bDeviceClass == 0x09U);
+    bool isVideoDev = (devDesc.bDeviceClass == 0x0EU);
+
+    bool hasAudioInterface = false;
+    bool hasHubInterface   = false;
+    bool hasVideoInterface = false;
+    bool hasMouseInterface = false;
+
     bool foundMscInterface = false;
     bool inMscInterface    = false;
     u8   mscInterfaceNum   = 0;
+    u8   mscAltSetting     = 0;
     u8   bulkInEpAddr      = 0;
     u8   bulkOutEpAddr     = 0;
     u16  bulkInMaxPkt      = 512;
@@ -722,6 +1058,13 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
     u8   bulkInMaxBurst    = 0;
     u8   bulkOutMaxBurst   = 0;
     u8   lastEpDirIn       = 0;
+
+    bool foundKbdInterface = false;
+    bool inKbdInterface    = false;
+    u8   kbdInterfaceNum   = 0;
+    u8   intrInEpAddr      = 0;
+    u16  intrInMaxPkt      = 8;
+    u8   intrInInterval    = 10;
 
     usize offset = 0;
     while (offset + 2 <= totalCfgLen) {
@@ -731,23 +1074,51 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
         if (bType == USB_DESC_INTERFACE && bLen >= sizeof(UsbInterfaceDescriptor)) {
             const auto* ifDesc = reinterpret_cast<const UsbInterfaceDescriptor*>(cfgBuf + offset);
+
+            if (ifDesc->bInterfaceClass == 0x01U) {
+                hasAudioInterface = true;
+            } else if (ifDesc->bInterfaceClass == 0x09U) {
+                hasHubInterface = true;
+            } else if (ifDesc->bInterfaceClass == 0x0EU) {
+                hasVideoInterface = true;
+            } else if (ifDesc->bInterfaceClass == 0x03U) { // HID
+                if (ifDesc->bInterfaceProtocol == 0x02U) {
+                    hasMouseInterface = true;
+                }
+            }
+
             bool isMscBot = (ifDesc->bInterfaceClass == USB_CLASS_MASS_STORAGE) &&
-                            (ifDesc->bInterfaceProtocol == USB_MSC_PROTO_BOT) &&
+                            (ifDesc->bInterfaceProtocol == USB_MSC_PROTO_BOT || ifDesc->bInterfaceProtocol == 0x00U) &&
                             (ifDesc->bInterfaceSubClass == USB_MSC_SUBCLASS_SCSI ||
                              ifDesc->bInterfaceSubClass == USB_MSC_SUBCLASS_UFI  ||
                              ifDesc->bInterfaceSubClass == USB_MSC_SUBCLASS_RBC  ||
+                             ifDesc->bInterfaceSubClass == 0x00U ||
                              ifDesc->bInterfaceSubClass == 0x02U ||
                              ifDesc->bInterfaceSubClass == 0x05U);
+
+            // Strict keyboard detection: HID class (0x03) and Keyboard protocol (0x01)
+            // Exclude audio devices, mice, hubs
+            bool isKeyboard = (ifDesc->bInterfaceClass == 0x03U) &&
+                              (ifDesc->bInterfaceProtocol == 0x01U) &&
+                              !isAudioDev;
+
             if (isMscBot && !foundMscInterface) {
                 inMscInterface  = true;
+                inKbdInterface  = false;
                 mscInterfaceNum = ifDesc->bInterfaceNumber;
+                mscAltSetting   = ifDesc->bAlternateSetting;
+            } else if (isKeyboard && !foundKbdInterface) {
+                inKbdInterface  = true;
+                inMscInterface  = false;
+                kbdInterfaceNum = ifDesc->bInterfaceNumber;
             } else {
                 inMscInterface = false;
+                inKbdInterface = false;
             }
-        } else if (bType == USB_DESC_ENDPOINT && bLen >= sizeof(UsbEndpointDescriptor) && inMscInterface) {
+        } else if (bType == USB_DESC_ENDPOINT && bLen >= sizeof(UsbEndpointDescriptor)) {
             const auto* epDesc = reinterpret_cast<const UsbEndpointDescriptor*>(cfgBuf + offset);
             u8 xferType = epDesc->bmAttributes & 0x03U;
-            if (xferType == 0x02U) { // Bulk Endpoint
+            if (inMscInterface && xferType == 0x02U) { // Bulk Endpoint
                 if (epDesc->bEndpointAddress & 0x80U) {
                     bulkInEpAddr = epDesc->bEndpointAddress;
                     bulkInMaxPkt = epDesc->wMaxPacketSize & 0x07FFU;
@@ -760,6 +1131,13 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
                 if (bulkInEpAddr != 0 && bulkOutEpAddr != 0) {
                     foundMscInterface = true;
                 }
+            } else if (inKbdInterface && xferType == 0x03U) { // Interrupt Endpoint
+                if (epDesc->bEndpointAddress & 0x80U) {
+                    intrInEpAddr      = epDesc->bEndpointAddress;
+                    intrInMaxPkt      = epDesc->wMaxPacketSize & 0x07FFU;
+                    intrInInterval    = epDesc->bInterval;
+                    foundKbdInterface = true;
+                }
             }
         } else if (bType == USB_DESC_SS_EP_COMPANION && bLen >= sizeof(UsbSsEpCompanionDescriptor) && inMscInterface) {
             const auto* ssComp = reinterpret_cast<const UsbSsEpCompanionDescriptor*>(cfgBuf + offset);
@@ -770,22 +1148,160 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
         offset += bLen;
     }
 
-    if (!foundMscInterface || bulkInEpAddr == 0 || bulkOutEpAddr == 0) {
-        return Status::Ok; // Non-storage USB device (e.g., HID, Hub, Bluetooth)
+    char vBuf[16]{}, pBuf[32]{};
+    klibc_snprintf(vBuf, sizeof(vBuf), "%04x", devDesc.idVendor);
+    klibc_snprintf(pBuf, sizeof(pBuf), "%04x", devDesc.idProduct);
+
+    // Strict classification: only acknowledge USB Keyboards and USB Mass Storage.
+    // Anything other than that is strictly ignored.
+    bool isKeyboard = (foundKbdInterface && intrInEpAddr != 0 &&
+                       !isAudioDev && !hasAudioInterface &&
+                       !hasMouseInterface &&
+                       !isHubDev && !hasHubInterface &&
+                       !isVideoDev && !hasVideoInterface);
+    bool isStorage  = (foundMscInterface && bulkInEpAddr != 0 && bulkOutEpAddr != 0 &&
+                       !isHubDev && !hasHubInterface);
+
+    if (!isKeyboard && !isStorage) {
+        UsbAttachedType classifiedType = UsbAttachedType::Unsupported;
+        if (isVideoDev || hasVideoInterface) {
+            classifiedType = UsbAttachedType::Video;
+        } else if (devDesc.bDeviceClass == 0xE0U || devDesc.idVendor == 0x8087U) {
+            classifiedType = UsbAttachedType::Bluetooth;
+        } else if (hasMouseInterface || (devDesc.bDeviceClass == 0x03U)) {
+            classifiedType = UsbAttachedType::MouseOrTouch;
+        } else if (isHubDev || hasHubInterface) {
+            classifiedType = UsbAttachedType::Hub;
+        } else if (isAudioDev || hasAudioInterface) {
+            classifiedType = UsbAttachedType::Audio;
+        } else if (devDesc.bDeviceClass == 0xFFU) {
+            classifiedType = UsbAttachedType::VendorSpecific;
+        }
+
+        teardownSlot(slotId);
+        if (portNum >= 1 && portNum <= m_maxPorts && portNum <= MAX_PORTS_PER_CTRL) {
+            m_ports[portNum - 1].setAttachedDevice(classifiedType, 0, vBuf, pBuf);
+        }
+        return Status::Ok;
     }
 
+    // Branch A: Verified USB Keyboard
+    if (isKeyboard) {
+        pr_dbg("xhci", "Port %u (Slot %u): Verified USB Keyboard [%s:%s] (Protocol 1) -> Configuring keyboard driver",
+              portNum, slotId, vBuf, pBuf);
+        // Step 7: Allocate UsbKeyboardDevice & Configure Interrupt IN Endpoint in xHCI
+        u32 kbdIdx = 0;
+        UsbKeyboardDevice* kbdDev = XhciManager::instance().allocateKeyboardDevice(&kbdIdx);
+        if (!kbdDev) {
+            pr_dbg("xhci", "Maximum USB Keyboard device count reached");
+            teardownSlot(slotId);
+            return Status::NoSpace;
+        }
+
+        u8 intrInDci = static_cast<u8>(((intrInEpAddr & 0x0FU) * 2U) + 1U);
+
+        memset(slot.inputCtxVirt, 0, PAGE_SIZE_4K);
+        icc->dropFlags = 0;
+        icc->addFlags  = (1U << 0) | (1U << intrInDci);
+
+        const auto* outSlotCtx = reinterpret_cast<const XhciSlotContext*>(getOutputSlotCtx(slot));
+        slotCtx->dw0 = (outSlotCtx->dw0 & ~(0x1FU << 27)) | (static_cast<u32>(intrInDci) << 27);
+        slotCtx->dw1 = outSlotCtx->dw1;
+        slotCtx->dw2 = outSlotCtx->dw2;
+
+        auto* epInCtx  = reinterpret_cast<XhciEndpointContext*>(getInputEpCtx(slot, intrInDci));
+        u32 ival = 3;
+        if (intrInInterval > 0) {
+            u32 microframes = static_cast<u32>(intrInInterval) * 8U;
+            while ((1U << (ival + 1)) <= microframes && ival < 11) {
+                ++ival;
+            }
+        }
+        epInCtx->dw0       = (ival << 16);
+        epInCtx->dw1       = (3U << 1) | (XHCI_EP_TYPE_INTR_IN << 3) |
+                             (static_cast<u32>(intrInMaxPkt) << 16);
+        epInCtx->trDequeue = kbdDev->getIntrRing().getPhysBase() | XHCI_TRB_CYCLE;
+        epInCtx->dw4       = intrInMaxPkt;
+
+        arch::memoryBarrier();
+
+        XhciTrb cfgEpCmd{};
+        cfgEpCmd.param   = slot.inputCtxPhys;
+        cfgEpCmd.status  = 0;
+        cfgEpCmd.control = (static_cast<u32>(XHCI_TRB_CONFIGURE_EP) << 10) |
+                           (static_cast<u32>(slotId) << 24);
+
+        st = submitCommand(cfgEpCmd, &cmdComp, 3000);
+        if (st != Status::Ok) {
+            pr_dbg("xhci", "Port %u (Slot %u): Configure Endpoint for Keyboard failed (CC=%u)",
+                   portNum, slotId, cmdComp.getCompletionCode());
+            teardownSlot(slotId);
+            return st;
+        }
+
+        UsbSetupPacket setCfg{};
+        setCfg.bmRequestType = 0x00U;
+        setCfg.bRequest      = USB_REQ_SET_CONFIGURATION;
+        setCfg.wValue        = cfgHdr.bConfigurationValue;
+        setCfg.wIndex        = 0;
+        setCfg.wLength       = 0;
+
+        st = controlTransfer(slotId, setCfg, nullptr, 0, false);
+        if (st != Status::Ok) {
+            pr_dbg("xhci", "Port %u (Slot %u): SET_CONFIGURATION(%u) failed",
+                   portNum, slotId, cfgHdr.bConfigurationValue);
+            teardownSlot(slotId);
+            return st;
+        }
+
+        arch::ApicController::instance().sleepMs(10);
+
+        st = kbdDev->init(this,
+                          kbdIdx,
+                          slotId,
+                          portNum,
+                          speedId,
+                          kbdInterfaceNum,
+                          intrInDci,
+                          intrInEpAddr,
+                          intrInMaxPkt,
+                          m_pmm,
+                          m_hhdmOffset);
+        if (st == Status::Ok) {
+            input::InputManager::instance().registerDevice(kbdDev);
+            drivers::DeviceRegistry::instance().registerCharDevice(kbdDev);
+            if (portNum >= 1 && portNum <= m_maxPorts && portNum <= MAX_PORTS_PER_CTRL) {
+                m_ports[portNum - 1].setAttachedDevice(UsbAttachedType::Keyboard, slotId, vBuf, pBuf);
+            }
+        } else {
+            XhciManager::instance().releaseKeyboardDevice(kbdDev);
+            teardownSlot(slotId);
+        }
+        return st;
+    }
+
+    // Branch B: Verified USB Mass Storage
     // Step 7: Allocate UsbMscDevice & Configure Bulk IN / Bulk OUT Endpoints in xHCI
     u32 mscIdx = 0;
     UsbMscDevice* mscDev = XhciManager::instance().allocateMscDevice(&mscIdx);
     if (!mscDev) {
-        pr_warn("xhci", "Maximum USB Mass Storage device count reached");
+        pr_dbg("xhci", "Maximum USB Mass Storage device count reached");
+        teardownSlot(slotId);
         return Status::NoSpace;
     }
 
     st = mscDev->getBulkInRing().init(m_pmm, m_hhdmOffset);
-    if (st != Status::Ok) return st;
+    if (st != Status::Ok) {
+        XhciManager::instance().releaseMscDevice(mscDev);
+        teardownSlot(slotId);
+        return st;
+    }
     st = mscDev->getBulkOutRing().init(m_pmm, m_hhdmOffset);
-    if (st != Status::Ok) return st;
+    if (st != Status::Ok) {
+        XhciManager::instance().releaseMscDevice(mscDev);
+        teardownSlot(slotId);
+        return st;
+    }
 
     u8 bulkInDci  = static_cast<u8>(((bulkInEpAddr & 0x0FU) * 2U) + 1U);
     u8 bulkOutDci = static_cast<u8>((bulkOutEpAddr & 0x0FU) * 2U);
@@ -826,8 +1342,10 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
     st = submitCommand(cfgEpCmd, &cmdComp, 3000);
     if (st != Status::Ok) {
-        pr_err("xhci", "Port %u (Slot %u): Configure Endpoint failed (CC=%u)",
+        pr_dbg("xhci", "Port %u (Slot %u): Configure Endpoint failed (CC=%u)",
                portNum, slotId, cmdComp.getCompletionCode());
+        XhciManager::instance().releaseMscDevice(mscDev);
+        teardownSlot(slotId);
         return st;
     }
 
@@ -841,9 +1359,21 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
 
     st = controlTransfer(slotId, setCfg, nullptr, 0, false);
     if (st != Status::Ok) {
-        pr_err("xhci", "Port %u (Slot %u): SET_CONFIGURATION(%u) failed",
+        pr_dbg("xhci", "Port %u (Slot %u): SET_CONFIGURATION(%u) failed",
                portNum, slotId, cfgHdr.bConfigurationValue);
+        XhciManager::instance().releaseMscDevice(mscDev);
+        teardownSlot(slotId);
         return st;
+    }
+
+    if (mscAltSetting != 0) {
+        UsbSetupPacket setAlt{};
+        setAlt.bmRequestType = 0x01U; // Host-to-Device | Standard | Interface
+        setAlt.bRequest      = USB_REQ_SET_INTERFACE;
+        setAlt.wValue        = mscAltSetting;
+        setAlt.wIndex        = mscInterfaceNum;
+        setAlt.wLength       = 0;
+        (void)controlTransfer(slotId, setAlt, nullptr, 0, false);
     }
 
     arch::ApicController::instance().sleepMs(10);
@@ -864,7 +1394,31 @@ Status XhciController::enumeratePortDevice(u8 portNum, u8 speedId) noexcept {
                       m_pmm,
                       m_hhdmOffset);
     if (st == Status::Ok) {
-        drivers::storage::GptPartitionScanner::instance().scanDisk(mscDev);
+        if (drivers::storage::MbrPartitionScanner::instance().scanDisk(mscDev) != Status::Ok) {
+            drivers::storage::GptPartitionScanner::instance().scanDisk(mscDev);
+        }
+
+        char vBuf[16]{}, pBuf[32]{};
+        klibc_snprintf(vBuf, sizeof(vBuf), "%04x", devDesc.idVendor);
+        klibc_snprintf(pBuf, sizeof(pBuf), "%04x", devDesc.idProduct);
+        if (portNum >= 1 && portNum <= m_maxPorts && portNum <= MAX_PORTS_PER_CTRL) {
+            m_ports[portNum - 1].setAttachedDevice(UsbAttachedType::MassStorage, slotId, vBuf, pBuf);
+        }
+
+        const char* prodName = mscDev->getProductString();
+        char cleanName[32]{};
+        if (prodName && prodName[0] != '\0') {
+            klibc_snprintf(cleanName, sizeof(cleanName), "%s", prodName);
+        } else {
+            klibc_snprintf(cleanName, sizeof(cleanName), "USB_Drive_%u", mscIdx);
+        }
+        drivers::storage::StorageManager::instance().onUsbStorageConnected(mscDev, cleanName);
+    } else {
+        XhciManager::instance().releaseMscDevice(mscDev);
+        teardownSlot(slotId);
+        if (portNum >= 1 && portNum <= m_maxPorts && portNum <= MAX_PORTS_PER_CTRL) {
+            m_ports[portNum - 1].clearAttachedDevice();
+        }
     }
 
     return st;
@@ -891,12 +1445,18 @@ const char* XhciManager::speedToString(u8 speedId) noexcept {
 }
 
 UsbMscDevice* XhciManager::allocateMscDevice(u32* outDeviceIndex) noexcept {
-    if (m_mscCount >= MAX_USB_MSC_DEVICES) {
-        return nullptr;
+    for (usize i = 0; i < MAX_USB_MSC_DEVICES; ++i) {
+        if (!m_mscDevices[i].isActive()) {
+            if (outDeviceIndex) *outDeviceIndex = static_cast<u32>(i);
+            return &m_mscDevices[i];
+        }
     }
-    u32 idx = static_cast<u32>(m_mscCount++);
-    if (outDeviceIndex) *outDeviceIndex = idx;
-    return &m_mscDevices[idx];
+    return nullptr;
+}
+
+void XhciManager::releaseMscDevice(UsbMscDevice* dev) noexcept {
+    if (!dev) return;
+    dev->deinit();
 }
 
 Status XhciManager::init(memory::IPhysicalAllocator* pmm,
@@ -920,21 +1480,339 @@ Status XhciManager::init(memory::IPhysicalAllocator* pmm,
         }
 
         XhciController& ctrl = m_controllers[m_ctrlCount];
-        if (ctrl.init(*pciDev, pmm, vmm, hhdmOffset) == Status::Ok) {
+        if (ctrl.init(*pciDev, static_cast<u8>(m_ctrlCount), pmm, vmm, hhdmOffset) == Status::Ok) {
             ++m_ctrlCount;
         }
     }
 
     if (m_ctrlCount == 0) {
-        pr_info("xhci", "No PCIe xHCI controllers (0C:03:30) detected");
+        pr_dbg("xhci", "No PCIe xHCI controllers (0C:03:30) detected");
         return Status::DeviceNotFound;
     }
 
     return Status::Ok;
 }
 
+void XhciController::dispatchTransferEvent(const XhciTrb& trb) noexcept {
+    u8 slotId = static_cast<u8>((trb.control >> 24) & 0xFFU);
+    u8 dci    = static_cast<u8>((trb.control >> 16) & 0x1FU);
+    if (auto* kbd = XhciManager::instance().findKeyboardBySlot(slotId)) {
+        if (kbd->getIntrInDci() == dci) {
+            kbd->handleTransferEvent(trb);
+        }
+    }
+}
+
+void XhciController::handlePortStatusChange(u8 portNum) noexcept {
+    if (portNum < 1 || portNum > m_maxPorts) return;
+    if (!isPortValid(portNum)) return;
+
+    u32 portsc = readPortsc(portNum);
+    bool ccs = (portsc & XHCI_PORTSC_CCS) != 0;
+    bool csc = (portsc & XHCI_PORTSC_CSC) != 0;
+    bool ped = (portsc & XHCI_PORTSC_PED) != 0;
+    bool attached = (portNum <= MAX_PORTS_PER_CTRL) && m_ports[portNum - 1].hasAttachedDevice();
+    bool physConnected = (portNum <= MAX_PORTS_PER_CTRL) && m_ports[portNum - 1].isPhysicallyConnected();
+
+    // Clear change bits
+    safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
+
+    // Case 1: Device is already attached on this port
+    if (attached) {
+        if (!ccs) {
+            // Physical disconnect: verify with debounce (100ms stable low)
+            if (!debouncePort(portNum, false)) {
+                // False alarm, still connected
+                return;
+            }
+            handlePortDisconnect(portNum);
+            return;
+        }
+
+        // Port is still connected (CCS=1)
+        if (ped) {
+            // Port is enabled and device is operating. Normal link state or reset change
+            // bits must NOT disconnect or re-enumerate an active device!
+            return;
+        }
+
+        // If port is no longer enabled (e.g. quick unplug/replug with CSC set)
+        if (csc) {
+            handlePortDisconnect(portNum);
+            handlePortConnect(portNum);
+        }
+        return;
+    }
+
+    // Case 2: No device is attached
+    if (!ccs) {
+        if (portNum <= MAX_PORTS_PER_CTRL) {
+            m_ports[portNum - 1].setPhysicallyConnected(false);
+        }
+        return;
+    }
+
+    // CCS is 1, but no device attached.
+    // If we already probed this port and it failed or was unsupported (physConnected is true)
+    // and no CSC occurred, do NOT repeatedly probe floating/dead lines!
+    if (physConnected && !csc) {
+        return;
+    }
+
+    handlePortConnect(portNum);
+}
+
+void XhciController::handlePortConnect(u8 portNum) noexcept {
+    if (portNum < 1 || portNum > m_maxPorts) return;
+    if (!isPortValid(portNum)) return;
+
+    // Check if peer USB 3.x port on the same physical connector is already active (SuperSpeed)
+    if (portNum <= MAX_PORTS_PER_CTRL) {
+        u8 peer = m_ports[portNum - 1].getPeerPortNum();
+        if (peer >= 1 && peer <= m_maxPorts && !m_ports[portNum - 1].isUsb3()) {
+            if (m_ports[peer - 1].hasAttachedDevice()) {
+                m_ports[portNum - 1].setPhysicallyConnected(true);
+                safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
+                return;
+            }
+            u32 peerPortsc = readPortsc(peer);
+            u8 peerSpeed = static_cast<u8>((peerPortsc >> 10) & 0x0FU);
+            if ((peerPortsc & XHCI_PORTSC_PED) && peerSpeed >= XHCI_SPEED_SUPER) {
+                // Peer SuperSpeed port is active; suppress redundant USB 2.0 reset
+                m_ports[portNum - 1].setPhysicallyConnected(true);
+                safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
+                return;
+            }
+            // If peer USB 3.x port detects a connection or is training, allow it a moment to finish link training
+            if (peerPortsc & XHCI_PORTSC_CCS) {
+                arch::ApicController::instance().sleepMs(50);
+                peerPortsc = readPortsc(peer);
+                peerSpeed = static_cast<u8>((peerPortsc >> 10) & 0x0FU);
+                if ((peerPortsc & XHCI_PORTSC_PED) && peerSpeed >= XHCI_SPEED_SUPER) {
+                    m_ports[portNum - 1].setPhysicallyConnected(true);
+                    safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
+                    return;
+                }
+            }
+        }
+    }
+
+    // If an attached device is already active on this port, do NOT disconnect or reconnect!
+    if (portNum <= MAX_PORTS_PER_CTRL && m_ports[portNum - 1].hasAttachedDevice()) {
+        return;
+    }
+
+    // Clean up any stale slot referencing this port
+    for (usize s = 1; s < MAX_SLOTS_PER_CTRL; ++s) {
+        if (m_slots[s].active && m_slots[s].portNum == portNum) {
+            teardownSlot(static_cast<u8>(s));
+        }
+    }
+
+    // Debounce: ensure connection remains stably high for 100ms
+    if (!debouncePort(portNum, true)) {
+        if (portNum <= MAX_PORTS_PER_CTRL) {
+            m_ports[portNum - 1].setPhysicallyConnected(false);
+        }
+        return;
+    }
+
+    if (portNum <= MAX_PORTS_PER_CTRL) {
+        m_ports[portNum - 1].setPhysicallyConnected(true);
+    }
+
+    u8 speedId = 0;
+    if (resetPort(portNum, &speedId)) {
+        if (enumeratePortDevice(portNum, speedId) != Status::Ok) {
+            pr_dbg("usb", "Port %u: Failed to enumerate USB device", portNum);
+        }
+    } else {
+        pr_dbg("usb", "Port %u: Failed to enable USB port after reset", portNum);
+    }
+}
+
+void XhciController::handlePortDisconnect(u8 portNum) noexcept {
+    if (portNum < 1 || portNum > m_maxPorts) return;
+    if (!isPortValid(portNum)) return;
+
+    if (portNum <= MAX_PORTS_PER_CTRL) {
+        m_ports[portNum - 1].setPhysicallyConnected(false);
+    }
+
+    u8 targetSlot = 0;
+    for (usize s = 1; s < MAX_SLOTS_PER_CTRL; ++s) {
+        if (m_slots[s].active && m_slots[s].portNum == portNum) {
+            targetSlot = static_cast<u8>(s);
+            break;
+        }
+    }
+
+    // Unconditionally teardown active slot on disconnect (matches Linux usb_disconnect)
+    if (targetSlot != 0) {
+        if (auto* kbd = XhciManager::instance().findKeyboardBySlot(targetSlot)) {
+            input::InputManager::instance().unregisterDevice(kbd);
+            drivers::DeviceRegistry::instance().unregisterCharDevice(kbd);
+            XhciManager::instance().releaseKeyboardDevice(kbd);
+        }
+
+        for (usize i = 0; i < XhciManager::MAX_USB_MSC_DEVICES; ++i) {
+            auto* msc = XhciManager::instance().getMscDeviceRaw(i);
+            if (msc && msc->isActive() && msc->getSlotId() == targetSlot) {
+                msc->markDisconnected();
+                drivers::storage::StorageManager::instance().onUsbStorageDisconnected(msc);
+                XhciManager::instance().releaseMscDevice(msc);
+                break;
+            }
+        }
+
+        teardownSlot(targetSlot);
+    }
+
+    if (portNum <= MAX_PORTS_PER_CTRL) {
+        m_ports[portNum - 1].clearAttachedDevice();
+    }
+
+    safeWritePortsc(portNum, 0, XHCI_PORTSC_CHANGE_BITS);
+}
+
+void XhciController::teardownSlot(u8 slotId) noexcept {
+    if (slotId == 0 || slotId >= MAX_SLOTS_PER_CTRL) return;
+
+    XhciSlotState& slot = m_slots[slotId];
+    if (!slot.active && slot.outputCtxPhys == 0 && slot.inputCtxPhys == 0 && slot.slotId == 0) {
+        return;
+    }
+
+    XhciTrb disableSlotCmd{};
+    disableSlotCmd.control = (static_cast<u32>(XHCI_TRB_DISABLE_SLOT) << 10) |
+                             (static_cast<u32>(slotId) << 24);
+    XhciTrb comp{};
+    (void)submitCommand(disableSlotCmd, &comp, 1000);
+
+    if (slot.outputCtxPhys && m_pmm) {
+        m_pmm->freePages(slot.outputCtxPhys, 1);
+        slot.outputCtxPhys = 0;
+        slot.outputCtxVirt = nullptr;
+    }
+    if (slot.inputCtxPhys && m_pmm) {
+        m_pmm->freePages(slot.inputCtxPhys, 1);
+        slot.inputCtxPhys = 0;
+        slot.inputCtxVirt = nullptr;
+    }
+
+    slot.ep0Ring.reset();
+    if (m_dcbaaVirt) {
+        m_dcbaaVirt[slotId] = 0;
+        arch::memoryBarrier();
+    }
+    slot.active   = false;
+    slot.slotId   = 0;
+    slot.portNum  = 0;
+    slot.speedId  = 0;
+
+    pr_dbg("xhci", "[usb-bus %u] Slot %u disabled and deallocated", m_busIndex, slotId);
+}
+
+void XhciController::markPortChange(u8 portNum) noexcept {
+    if (portNum >= 1 && portNum <= m_maxPorts) {
+        m_pendingPortMask |= (1U << portNum);
+    }
+}
+
+void XhciController::pollPortsAndEvents() noexcept {
+    if (!m_ready) return;
+
+    m_eventRing.processEvents(this);
+
+    u64 nowMs = arch::ApicController::instance().getUptimeMs();
+    if (nowMs - m_lastPortScanMs >= 100) {
+        m_lastPortScanMs = nowMs;
+
+        for (u8 port = 1; port <= m_maxPorts; ++port) {
+            if (!isPortValid(port)) continue;
+            u32 portsc = readPortsc(port);
+
+            bool currentCcs = (portsc & XHCI_PORTSC_CCS) != 0;
+            bool lastCcs = (port <= MAX_PORTS_PER_CTRL) ? m_ports[port - 1].isPhysicallyConnected() : false;
+            bool cscSet = (portsc & XHCI_PORTSC_CSC) != 0;
+
+            // Follow Linux USB hub logic: only trigger port connect/disconnect handling
+            // when the physical connect state transitions (CSC or currentCcs != lastCcs).
+            if (cscSet || (currentCcs != lastCcs)) {
+                safeWritePortsc(port, 0, XHCI_PORTSC_CHANGE_BITS);
+                markPortChange(port);
+            } else if (portsc & (XHCI_PORTSC_PRC | XHCI_PORTSC_WRC | XHCI_PORTSC_PLC)) {
+                // Clear transient reset/link change bits without re-probing
+                safeWritePortsc(port, 0, portsc & (XHCI_PORTSC_PRC | XHCI_PORTSC_WRC | XHCI_PORTSC_PLC));
+            }
+        }
+
+        // Always clear USBSTS.PCD to unmask hardware port change interrupts / events
+        writeOp32(XHCI_OP_USBSTS, XHCI_STS_PCD | XHCI_STS_EINT);
+    }
+
+    if (!m_inPortScan && m_pendingPortMask != 0) {
+        m_inPortScan = true;
+        u32 mask = m_pendingPortMask;
+        m_pendingPortMask = 0;
+
+        // Pass 1: Handle USB 3.x ports first so SuperSpeed devices bind before companion USB 2.0 lines
+        for (u8 port = 1; port <= m_maxPorts; ++port) {
+            if ((mask & (1U << port)) && (port <= MAX_PORTS_PER_CTRL) && m_ports[port - 1].isUsb3()) {
+                handlePortStatusChange(port);
+            }
+        }
+        // Pass 2: Handle USB 2.0 / legacy ports
+        for (u8 port = 1; port <= m_maxPorts; ++port) {
+            if ((mask & (1U << port)) && ((port > MAX_PORTS_PER_CTRL) || !m_ports[port - 1].isUsb3())) {
+                handlePortStatusChange(port);
+            }
+        }
+        m_inPortScan = false;
+    }
+}
+
 void XhciManager::onInterrupt(arch::InterruptFrame*) noexcept {
-    // MSI/MSI-X interrupt notification (Event Ring is drained by XhciEventRing)
+    for (usize i = 0; i < m_ctrlCount; ++i) {
+        if (m_controllers[i].isReady()) {
+            m_controllers[i].getEventRing()->processEvents(&m_controllers[i]);
+        }
+    }
+}
+
+UsbKeyboardDevice* XhciManager::allocateKeyboardDevice(u32* outDeviceIndex) noexcept {
+    for (usize i = 0; i < MAX_USB_KBD_DEVICES; ++i) {
+        if (!m_kbdDevices[i].isActive()) {
+            if (outDeviceIndex) *outDeviceIndex = static_cast<u32>(i);
+            return &m_kbdDevices[i];
+        }
+    }
+    return nullptr;
+}
+
+void XhciManager::releaseKeyboardDevice(UsbKeyboardDevice* dev) noexcept {
+    if (!dev) return;
+    dev->stop();
+}
+
+UsbKeyboardDevice* XhciManager::findKeyboardBySlot(u8 slotId) noexcept {
+    for (usize i = 0; i < MAX_USB_KBD_DEVICES; ++i) {
+        if (m_kbdDevices[i].isActive() && m_kbdDevices[i].getSlotId() == slotId) {
+            return &m_kbdDevices[i];
+        }
+    }
+    return nullptr;
+}
+
+void XhciManager::pollEventsAndPorts() noexcept {
+    for (usize i = 0; i < m_ctrlCount; ++i) {
+        m_controllers[i].pollPortsAndEvents();
+    }
+    for (usize i = 0; i < MAX_USB_KBD_DEVICES; ++i) {
+        if (m_kbdDevices[i].isActive()) {
+            m_kbdDevices[i].pollAutorepeat();
+        }
+    }
 }
 
 } // namespace cortez::drivers::usb

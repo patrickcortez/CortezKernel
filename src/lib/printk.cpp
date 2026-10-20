@@ -200,27 +200,56 @@ void Logger::log(Level level, const char* subsystem, const char* fmt, ...) noexc
     u64 secs     = totalUs / 1000000ULL;
     u64 usecs    = totalUs % 1000000ULL;
 
-    auto emitBoth = [](char c, void* selfPtr) {
-        auto* self = static_cast<Logger*>(selfPtr);
-        self->appendCharToBuffer(c);
-        self->putChar(c);
-    };
+    bool echoConsole = (m_console != nullptr) && (level != Level::Debug);
+    if (subsystem) {
+        if (str::compare(subsystem, "xhci") == 0 ||
+            str::compare(subsystem, "usb-port") == 0 ||
+            str::compare(subsystem, "usb-kbd") == 0 ||
+            str::compare(subsystem, "usb-msc") == 0) {
+            echoConsole = false;
+        } else if (str::compare(subsystem, "usb") == 0) {
+            if (level != Level::Ok && level != Level::Info && level != Level::Warn && level != Level::Error) {
+                echoConsole = false;
+            }
+        }
+    }
 
-    auto emitConsoleOnly = [](char c, void* selfPtr) {
-        auto* self = static_cast<Logger*>(selfPtr);
-        self->putChar(c);
+    struct LogEmitCtx {
+        Logger* logger;
+        bool    echoConsole;
+    };
+    LogEmitCtx emitCtx{this, echoConsole};
+
+    auto emitTarget = [](char c, void* ctxPtr) {
+        auto* ctx = static_cast<LogEmitCtx*>(ctxPtr);
+        ctx->logger->appendCharToBuffer(c);
+        if (c == '\n') {
+            ctx->logger->putSerialChar('\r');
+        }
+        ctx->logger->putSerialChar(c);
+        if (ctx->echoConsole && ctx->logger->m_console) {
+            (void)ctx->logger->m_console->write(&c, 1);
+        }
     };
 
     auto writeStr = [&](const char* s, bool recordInBuffer) {
         while (*s) {
-            if (recordInBuffer) appendCharToBuffer(*s);
-            putChar(*s++);
+            char c = *s++;
+            if (recordInBuffer) appendCharToBuffer(c);
+            if (c == '\n') putSerialChar('\r');
+            putSerialChar(c);
+            if (echoConsole && m_console) {
+                (void)m_console->write(&c, 1);
+            }
         }
     };
 
     // ANSI color prefix for terminal, plain text for dmesg buffer
-    writeStr("\033[90m[", false);
+    if (echoConsole) {
+        writeStr("\033[90m[", false);
+    }
     appendCharToBuffer('[');
+    putSerialChar('[');
 
     char timeBuf[32];
     str::uintToStr(secs, timeBuf, 10, 5);
@@ -228,30 +257,41 @@ void Logger::log(Level level, const char* subsystem, const char* fmt, ...) noexc
     writeStr(".", true);
     str::uintToStr(usecs, timeBuf, 10, 6);
     writeStr(timeBuf, true);
-    writeStr("]\033[0m ", false);
+
+    if (echoConsole) {
+        writeStr("]\033[0m ", false);
+    } else {
+        putSerialChar(']');
+        putSerialChar(' ');
+    }
     appendCharToBuffer(']');
     appendCharToBuffer(' ');
 
-    switch (level) {
-        case Level::Info:  writeStr("\033[36m", false); break;
-        case Level::Ok:    writeStr("\033[32m", false); break;
-        case Level::Warn:  writeStr("\033[33m", false); break;
-        case Level::Error: writeStr("\033[31m", false); break;
+    if (echoConsole) {
+        switch (level) {
+            case Level::Debug: writeStr("\033[90m", false); break;
+            case Level::Info:  writeStr("\033[36m", false); break;
+            case Level::Ok:    writeStr("\033[32m", false); break;
+            case Level::Warn:  writeStr("\033[33m", false); break;
+            case Level::Error: writeStr("\033[31m", false); break;
+        }
     }
 
     if (subsystem && subsystem[0]) {
         writeStr(subsystem, true);
         writeStr(": ", true);
     }
-    writeStr("\033[0m", false);
+
+    if (echoConsole) {
+        writeStr("\033[0m", false);
+    }
 
     va_list args;
     va_start(args, fmt);
-    formatArgs(emitBoth, this, fmt, args);
+    formatArgs(emitTarget, &emitCtx, fmt, args);
     va_end(args);
 
-    emitBoth('\n', this);
-    (void)emitConsoleOnly;
+    emitTarget('\n', &emitCtx);
 }
 
 void Logger::printf(const char* fmt, ...) noexcept {

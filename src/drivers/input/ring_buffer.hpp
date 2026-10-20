@@ -43,6 +43,12 @@ public:
         return m_head == m_tail;
     }
 
+    void clear() noexcept {
+        IrqLockGuard guard(m_lock);
+        m_head = 0;
+        m_tail = 0;
+    }
+
 private:
     mutable Spinlock m_lock;
     T                m_data[Capacity]{};

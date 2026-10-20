@@ -249,6 +249,8 @@ def build_exfat_partition(total_sectors: int, kernel_bytes: bytes, limine_conf_b
     home_dir_cl, _ = alloc_clusters(b"")
     # Allocate /var directory (Cluster 9)
     var_dir_cl, _ = alloc_clusters(b"")
+    # Allocate /usb directory (Cluster 10)
+    usb_dir_cl, _ = alloc_clusters(b"")
 
     def pack_host_dir(host_dir: str) -> int:
         dir_cl, _ = alloc_clusters(b"")
@@ -347,7 +349,8 @@ def build_exfat_partition(total_sectors: int, kernel_bytes: bytes, limine_conf_b
         make_exfat_entry_set("root", True, root_home_cl, cluster_size) +
         make_exfat_entry_set("home", True, home_dir_cl, cluster_size) +
         make_exfat_entry_set("var", True, var_dir_cl, cluster_size) +
-        make_exfat_entry_set("ext", True, ext_dir_cl, cluster_size)
+        make_exfat_entry_set("ext", True, ext_dir_cl, cluster_size) +
+        make_exfat_entry_set("usb", True, usb_dir_cl, cluster_size)
     )
     vol[cluster_byte_offset(4) : cluster_byte_offset(4) + len(root_dir_bytes)] = root_dir_bytes
 

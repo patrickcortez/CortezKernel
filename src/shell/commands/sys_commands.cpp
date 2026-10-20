@@ -12,7 +12,9 @@
 #include "../../drivers/storage/nvme_controller.hpp"
 #include "../../drivers/storage/ahci_controller.hpp"
 #include "../../drivers/storage/storage_manager.hpp"
+#include "../../drivers/storage/os_installer.hpp"
 #include "../../drivers/usb/xhci_controller.hpp"
+#include "../../drivers/input/input_manager.hpp"
 #include "../../arch/x86_64/pcie.hpp"
 #include "../../arch/x86_64/apic.hpp"
 #include "../../arch/x86_64/io_ports.hpp"
@@ -21,6 +23,7 @@
 #include "../../memory/heap_allocator.hpp"
 #include "../../proc/scheduler.hpp"
 #include "../../fs/vfs_manager.hpp"
+#include "../../fs/fs_detector.hpp"
 #include "../../klibc/klibc.hpp"
 #include "../../lib/printk.hpp"
 
@@ -54,20 +57,29 @@ Status LsblkCommand::execute(const CommandArgs&) {
     auto& reg = drivers::DeviceRegistry::instance();
     usize count = reg.getBlockDeviceCount();
 
-    kprintf("  \033[90m%-12s %-6s %10s %14s %12s  %s\033[0m\n",
-            "NAME", "TYPE", "SECT-SIZE", "SECTORS", "SIZE (MiB)", "LABEL");
+    kprintf("  \033[90m%-12s %-6s %10s %12s %-10s  %s\033[0m\n",
+            "NAME", "TYPE", "SECT-SIZE", "SIZE", "FS", "LABEL");
 
     for (usize i = 0; i < count; ++i) {
         drivers::IBlockDevice* bdev = reg.getBlockDeviceAt(i);
         if (!bdev) continue;
         u64 bytes = bdev->getBlockCount() * bdev->getBlockSize();
-        const char* lbl = bdev->getLabel();
-        kprintf("  /dev/%-7s %-6s %8u B %14llu %9llu MiB  %s\n",
+        u64 sizeMiB = bytes / (1024ULL * 1024ULL);
+        char sizeStr[16]{};
+        if (sizeMiB >= 1024) {
+            klibc_snprintf(sizeStr, sizeof(sizeStr), "%llu.%llu GiB", sizeMiB / 1024ULL, (sizeMiB % 1024ULL) * 10ULL / 1024ULL);
+        } else {
+            klibc_snprintf(sizeStr, sizeof(sizeStr), "%llu MiB", sizeMiB);
+        }
+        auto probe = fs::FsDetector::probe(bdev);
+        const char* fsStr = (probe.type != fs::DetectedFsType::Unknown) ? fs::FsDetector::typeToString(probe.type) : "-";
+        const char* lbl = (probe.volumeLabel[0] != '\0') ? probe.volumeLabel : bdev->getLabel();
+        kprintf("  /dev/%-7s %-6s %8u B %12s %-10s  %s\n",
                 bdev->getName(),
                 bdev->getBusTypeName(),
                 bdev->getBlockSize(),
-                bdev->getBlockCount(),
-                bytes / (1024ULL * 1024ULL),
+                sizeStr,
+                fsStr,
                 (lbl && lbl[0]) ? lbl : "-");
     }
     return Status::Ok;
@@ -209,27 +221,97 @@ Status LsusbCommand::execute(const CommandArgs&) {
                 ctrl->getMaxPorts(), ctrl->getMaxSlots());
     }
 
-    usize mscCount = usbMgr.getMscDeviceCount();
-    if (mscCount == 0) {
-        kprintf("  \033[90m(no USB Mass Storage drives attached)\033[0m\n");
-        return Status::Ok;
+    // 2. Physical Root Hub Ports & Dynamic Device Classification
+    auto& portMgr = drivers::usb::UsbPortManager::instance();
+    kprintf("\n  \033[36mPhysical USB Ports & Connected Devices:\033[0m\n");
+    for (usize c = 0; c < ctrlCount; ++c) {
+        const auto* ctrl = usbMgr.getController(c);
+        if (!ctrl) continue;
+        kprintf("  \033[1;37m[usb-bus %zu]\033[0m", c);
+        usize protoCnt = ctrl->getProtocolCount();
+        if (protoCnt > 0) {
+            kprintf(" (Protocols:");
+            for (usize p = 0; p < protoCnt; ++p) {
+                const auto* pr = ctrl->getProtocol(p);
+                if (pr) {
+                    kprintf(" %s ports %u-%u;",
+                            (pr->majorRev == 3) ? "USB 3.x" : "USB 2.0",
+                            pr->portOffset, pr->portOffset + pr->portCount - 1);
+                }
+            }
+            kprintf(")");
+        }
+        kprintf("\n");
+
+        u8 maxPorts = ctrl->getMaxPorts();
+        for (u8 port = 1; port <= maxPorts; ++port) {
+            u8 maj = 0, min = 0;
+            if (!ctrl->isPortValid(port, &maj, &min)) {
+                continue;
+            }
+            auto* p = portMgr.findPortByBus(static_cast<u8>(c), port);
+            if (!p) continue;
+
+            const char* protoStr = p->getProtocolString();
+            if (p->isConnected()) {
+                const char* vName = p->getVendorName()[0] ? p->getVendorName() : "----";
+                const char* pName = p->getProductName()[0] ? p->getProductName() : "----";
+                kprintf("    Port %-2u [%-7s]: \033[32mConnected\033[0m    %-18s Slot %-2u [%s:%s] %s\n",
+                        port,
+                        protoStr,
+                        p->getSpeedString(),
+                        p->getSlotId(),
+                        vName,
+                        pName,
+                        p->getAttachedTypeString());
+            } else {
+                kprintf("    Port %-2u [%-7s]: \033[90mDisconnected\033[0m (empty)\n",
+                        port,
+                        protoStr);
+            }
+        }
     }
 
+    // 3. Active USB Keyboards
+    usize kbdCount = usbMgr.getKeyboardCount();
+    kprintf("\n  \033[36mUSB Keyboards (%zu):\033[0m\n", kbdCount);
+    if (kbdCount == 0) {
+        kprintf("    \033[90m(no USB keyboards attached)\033[0m\n");
+    } else {
+        auto* mainKbd = drivers::input::InputManager::instance().getMainKeyboard();
+        for (usize i = 0; i < drivers::usb::XhciManager::MAX_USB_KBD_DEVICES; ++i) {
+            auto* kbd = usbMgr.getKeyboardDevice(i);
+            if (!kbd || !kbd->isActive()) continue;
+            bool isMain = (kbd == mainKbd);
+            kprintf("    /%-10s Port %-2u Slot %-2u \033[%sm[%s]\033[0m %s\n",
+                    kbd->getName(), kbd->getPortNum(), kbd->getSlotId(),
+                    isMain ? "32" : "90",
+                    isMain ? "MAIN" : "SECONDARY",
+                    isMain ? "(Active console stdin)" : "(Standby, switch with 'chkbd')");
+        }
+    }
+
+    // 4. USB Mass Storage Block Devices
+    usize mscCount = usbMgr.getMscDeviceCount();
     kprintf("\n  \033[36mUSB Mass Storage Block Devices (%zu):\033[0m\n", mscCount);
-    for (usize i = 0; i < mscCount; ++i) {
-        const auto* dev = usbMgr.getMscDevice(i);
-        if (!dev || !dev->isReady()) continue;
-        u64 sizeMiB = (dev->getBlockCount() * dev->getBlockSize()) / (1024ULL * 1024ULL);
-        kprintf("    /dev/%-6s Port %-2u Slot %-2u [%04x:%04x] %-18s '%s %s' (%llu MiB)\n",
-                dev->getName(),
-                dev->getPortNumber(),
-                dev->getSlotId(),
-                dev->getUsbVendorId(),
-                dev->getUsbProductId(),
-                drivers::usb::XhciManager::speedToString(dev->getSpeedId()),
-                dev->getVendorString(),
-                dev->getProductString(),
-                sizeMiB);
+    if (mscCount == 0) {
+        kprintf("    \033[90m(no USB Mass Storage drives attached)\033[0m\n");
+    } else {
+        for (usize i = 0; i < drivers::usb::XhciManager::MAX_USB_MSC_DEVICES; ++i) {
+            const auto* dev = usbMgr.getMscDeviceRaw(i);
+            if (!dev || !dev->isActive() || !dev->isReady()) continue;
+            u64 sizeMiB = (dev->getBlockCount() * dev->getBlockSize()) / (1024ULL * 1024ULL);
+            kprintf("    /dev/%-6s Port %-2u Slot %-2u [%04x:%04x] %-18s '%s %s' (%llu MiB)\n",
+                    dev->getName(),
+                    dev->getPortNumber(),
+                    dev->getSlotId(),
+                    dev->getUsbVendorId(),
+                    dev->getUsbProductId(),
+                    drivers::usb::XhciManager::speedToString(dev->getSpeedId()),
+                    dev->getVendorString(),
+                    dev->getProductString(),
+                    sizeMiB);
+        }
     }
     return Status::Ok;
 }
@@ -374,6 +456,113 @@ Status NanoCommand::execute(const CommandArgs& args) {
 
 Status EditCommand::execute(const CommandArgs& args) {
     return launchNanoEditor(args);
+}
+
+Status ChkbdCommand::execute(const CommandArgs& args) {
+    auto& inMgr = drivers::input::InputManager::instance();
+    auto* mainKbd = inMgr.getMainKeyboard();
+
+    if (args.argc <= 1) {
+        kprintf("  \033[36mConsole Main Keyboard:\033[0m \033[32m%s\033[0m\n",
+                mainKbd ? mainKbd->getName() : "none");
+        usize count = inMgr.getDeviceCount();
+        kprintf("  \033[36mRegistered Keyboards (%zu):\033[0m\n", count);
+        for (usize i = 0; i < count; ++i) {
+            auto* dev = inMgr.getDeviceAt(i);
+            if (!dev) continue;
+            bool isMain = (dev == mainKbd);
+            const char* typeDesc = "Input Device";
+            if (str::compare(dev->getName(), "kbd0") == 0) {
+                typeDesc = "PS/2 Keyboard";
+            } else if (str::compareN(dev->getName(), "ukbd", 4) == 0) {
+                typeDesc = "USB Keyboard";
+            }
+            kprintf("    [%zu] %-8s (%s) %s\n",
+                    i, dev->getName(), typeDesc,
+                    isMain ? "\033[32m[MAIN KEYBOARD]\033[0m" : "\033[90m[SECONDARY]\033[0m");
+        }
+        kprintf("  Usage: chkbd <device_name> (e.g. chkbd ukbd0, chkbd kbd0)\n");
+        return Status::Ok;
+    }
+
+    const char* targetName = args.argv[1];
+    Status st = inMgr.setMainKeyboard(targetName);
+    if (st == Status::Ok) {
+        kprintf("\033[32mSuccessfully switched MAIN keyboard to '%s'.\033[0m\n", targetName);
+    } else {
+        kprintf("\033[31mError:\033[0m Keyboard device '%s' not found.\n", targetName);
+        kprintf("Available keyboards: ");
+        usize count = inMgr.getDeviceCount();
+        for (usize i = 0; i < count; ++i) {
+            auto* dev = inMgr.getDeviceAt(i);
+            if (dev) kprintf("%s%s", dev->getName(), (i + 1 < count) ? ", " : "\n");
+        }
+    }
+    return Status::Ok;
+}
+
+Status InstallCommand::execute(const CommandArgs& args) {
+    auto& inst = drivers::storage::OsInstaller::instance();
+
+    if (args.argc >= 2) {
+        const char* targetName = args.argv[1];
+        kprintf("\033[36mInitiating Cortez OS installation onto target disk '%s'...\033[0m\n", targetName);
+        return inst.installByName(targetName);
+    }
+
+    drivers::storage::DiskInstallInfo disks[drivers::storage::OsInstaller::MAX_TARGET_DISKS]{};
+    usize count = 0;
+    Status st = inst.scanCandidateDisks(disks, drivers::storage::OsInstaller::MAX_TARGET_DISKS, &count);
+    if (st != Status::Ok || count == 0) {
+        kprintf("\033[33mNo candidate physical internal disks found for installation.\033[0m\n");
+        kprintf("Ensure an internal NVMe SSD or SATA hard drive is connected (not the live boot USB).\n");
+        return Status::NotFound;
+    }
+
+    kprintf("\n\033[36m=================================================================\033[0m\n");
+    kprintf("\033[36m           Cortez Operating System — Disk Installer              \033[0m\n");
+    kprintf("\033[36m=================================================================\033[0m\n");
+    kprintf("Discovered Candidate Disks (%zu):\n\n", count);
+
+    int suitableIndex = -1;
+    usize suitableCount = 0;
+
+    for (usize i = 0; i < count; ++i) {
+        const auto& d = disks[i];
+        kprintf("  [%zu] \033[1m/dev/%-10s\033[0m (%llu MiB) [%s] - %s\n",
+                i + 1, d.name, d.totalSizeMiB, d.disk ? d.disk->getBusTypeName() : "Unknown",
+                d.hasEnoughSpace ? "\033[32mEligible (Free Space Found)\033[0m" : "\033[33mInsufficient Free Space\033[0m");
+        kprintf("       Existing Partitions: %u | EFI System Partition: %s\n",
+                d.existingPartCount,
+                d.hasEsp ? d.espPartName : "None (will create 64 MiB ESP)");
+        kprintf("       Largest Unallocated Space: \033[32m%llu MiB\033[0m (LBA %llu..%llu)\n\n",
+                d.largestFree.sizeMiB, d.largestFree.startLba, d.largestFree.endLba);
+
+        if (d.hasEnoughSpace) {
+            suitableIndex = static_cast<int>(i);
+            ++suitableCount;
+        }
+    }
+
+    if (suitableCount == 0) {
+        kprintf("\033[33mNone of the candidate disks have at least 128 MiB of unallocated space.\033[0m\n");
+        kprintf("Please shrink an existing partition in Windows or Linux to free up unallocated space,\n");
+        kprintf("then re-run 'install'.\n");
+        return Status::NoSpace;
+    }
+
+    if (suitableCount == 1 && suitableIndex >= 0) {
+        const auto& chosen = disks[suitableIndex];
+        kprintf("\033[32mAuto-selecting candidate disk /dev/%s for installation...\033[0m\n\n", chosen.name);
+        return inst.installToDisk(chosen.disk);
+    }
+
+    kprintf("\033[36mMultiple disks with unallocated space detected.\033[0m\n");
+    kprintf("Specify the target disk to install to:\n");
+    kprintf("  \033[1minstall /dev/<disk_name>\033[0m  (e.g. install /dev/%s)\n\n",
+            disks[suitableIndex].name);
+
+    return Status::Ok;
 }
 
 } // namespace cortez::shell::commands

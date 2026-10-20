@@ -4,6 +4,7 @@
  */
 
 #include "xhci_rings.hpp"
+#include "xhci_controller.hpp"
 #include "../../arch/x86_64/cpu.hpp"
 #include "../../arch/x86_64/apic.hpp"
 #include "../../lib/string_utils.hpp"
@@ -141,7 +142,8 @@ void XhciEventRing::updateErdp() noexcept {
 }
 
 void XhciEventRing::drainEvents() noexcept {
-    for (usize guard = 0; guard < EVENT_RING_CAPACITY; ++guard) {
+    IrqLockGuard guard(m_lock);
+    for (usize guardIdx = 0; guardIdx < EVENT_RING_CAPACITY; ++guardIdx) {
         volatile const XhciTrb& ev = m_trbsVirt[m_dequeueIdx];
         u8 cycle = static_cast<u8>(ev.control & XHCI_TRB_CYCLE);
         if (cycle != m_cycleState) {
@@ -156,41 +158,89 @@ void XhciEventRing::drainEvents() noexcept {
     }
 }
 
+void XhciEventRing::dispatchEvents(XhciController* ctrl) noexcept {
+    if (!ctrl) return;
+    IrqLockGuard guard(m_lock);
+
+    for (usize guardIdx = 0; guardIdx < EVENT_RING_CAPACITY; ++guardIdx) {
+        volatile const XhciTrb& ev = m_trbsVirt[m_dequeueIdx];
+        u32 ctrlBits = ev.control;
+        u8 cycle = static_cast<u8>(ctrlBits & XHCI_TRB_CYCLE);
+        if (cycle != m_cycleState) {
+            break;
+        }
+
+        arch::memoryBarrier();
+        XhciTrb captured{};
+        captured.param   = ev.param;
+        captured.status  = ev.status;
+        captured.control = ctrlBits;
+
+        if (++m_dequeueIdx >= EVENT_RING_CAPACITY) {
+            m_dequeueIdx = 0;
+            m_cycleState ^= 1U;
+        }
+        updateErdp();
+
+        u8 type = captured.getType();
+        if (type == XHCI_TRB_PORT_STATUS_CHG) {
+            u8 portNum = static_cast<u8>((captured.param >> 24) & 0xFFU);
+            ctrl->markPortChange(portNum);
+            continue;
+        }
+
+        // 1. Dispatch to registered synchronous waiters first
+        if (ctrl->dispatchToWaiters(captured)) {
+            continue;
+        }
+
+        // 2. If not claimed by a waiter, dispatch asynchronous transfer event (e.g. keyboard)
+        if (type == XHCI_TRB_TRANSFER_EVENT) {
+            ctrl->dispatchTransferEvent(captured);
+        }
+    }
+}
+
+void XhciEventRing::processEvents(XhciController* ctrl) noexcept {
+    dispatchEvents(ctrl);
+}
+
 Status XhciEventRing::pollEvent(u8 expectedType, XhciTrb* outEvent, u32 timeoutMs) noexcept {
     u64 startMs = arch::ApicController::instance().getUptimeMs();
     u32 spinGuard = 0;
     u32 maxSpins  = timeoutMs * 40000U;
 
     for (;;) {
-        volatile const XhciTrb& ev = m_trbsVirt[m_dequeueIdx];
-        u32 ctrl  = ev.control;
-        u8  cycle = static_cast<u8>(ctrl & XHCI_TRB_CYCLE);
+        {
+            IrqLockGuard guard(m_lock);
+            volatile const XhciTrb& ev = m_trbsVirt[m_dequeueIdx];
+            u32 ctrl  = ev.control;
+            u8  cycle = static_cast<u8>(ctrl & XHCI_TRB_CYCLE);
 
-        if (cycle == m_cycleState) {
-            arch::memoryBarrier();
-            XhciTrb captured{};
-            captured.param   = ev.param;
-            captured.status  = ev.status;
-            captured.control = ctrl;
+            if (cycle == m_cycleState) {
+                arch::memoryBarrier();
+                XhciTrb captured{};
+                captured.param   = ev.param;
+                captured.status  = ev.status;
+                captured.control = ctrl;
 
-            if (++m_dequeueIdx >= EVENT_RING_CAPACITY) {
-                m_dequeueIdx = 0;
-                m_cycleState ^= 1U;
-            }
-            updateErdp();
-
-            if (captured.getType() == expectedType) {
-                if (outEvent) {
-                    *outEvent = captured;
+                if (++m_dequeueIdx >= EVENT_RING_CAPACITY) {
+                    m_dequeueIdx = 0;
+                    m_cycleState ^= 1U;
                 }
-                u8 cc = captured.getCompletionCode();
-                if (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET) {
-                    return Status::Ok;
+                updateErdp();
+
+                if (captured.getType() == expectedType) {
+                    if (outEvent) {
+                        *outEvent = captured;
+                    }
+                    u8 cc = captured.getCompletionCode();
+                    if (cc == XHCI_CC_SUCCESS || cc == XHCI_CC_SHORT_PACKET) {
+                        return Status::Ok;
+                    }
+                    return Status::IoError;
                 }
-                return Status::IoError;
             }
-            // Asynchronous event (e.g., Port Status Change Event) — continue polling for expectedType
-            continue;
         }
 
         arch::pause();
